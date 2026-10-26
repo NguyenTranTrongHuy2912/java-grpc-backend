@@ -42,6 +42,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .asRuntimeException());
             return;
         }
+        long savedTimestamp = request.getTimestamp();
         try {
             messageCollection.insertOne(new Document()
                     .append("_id", request.getMessageId())
@@ -50,11 +51,19 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .append("content", request.getContent())
                     .append("timestamp", request.getTimestamp()));
         } catch (MongoWriteException e) {
-            // Gửi lại cùng message_id: coi như đã lưu, không báo lỗi
             if (e.getError().getCategory() != ErrorCategory.DUPLICATE_KEY) {
                 log.error("Lưu tin nhắn {} thất bại", request.getMessageId(), e);
                 out.onError(Status.INTERNAL.withDescription("Không lưu được tin nhắn").asRuntimeException());
                 return;
+            }
+            try {
+                Document existing = messageCollection
+                        .find(Filters.eq("_id", request.getMessageId())).first();
+                if (existing != null && existing.getLong("timestamp") != null) {
+                    savedTimestamp = existing.getLong("timestamp");
+                }
+            } catch (Exception ex) {
+                log.warn("Không đọc lại được tin {} sau khi trùng", request.getMessageId(), ex);
             }
         } catch (Exception e) {
             log.error("Lưu tin nhắn {} thất bại", request.getMessageId(), e);
@@ -65,7 +74,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 .setMessageId(request.getMessageId())
                 .setIsSuccess(true)
                 .setStatusMessage("Đã lưu tin nhắn")
-                .setTimestamp(request.getTimestamp())   // trả timestamp đã lưu, không phải giờ phản hồi
+                .setTimestamp(savedTimestamp)
                 .build());
         out.onCompleted();
     }
