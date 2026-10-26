@@ -72,32 +72,44 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
     @Override
     public void getMessageHistory(HistoryRequest request, StreamObserver<HistoryResponse> responseObserver) {
-        int limit = request.getLimit() <= 0 ? 50 : Math.min(request.getLimit(), 100);
-
-        Bson filter = Filters.eq("room_id", request.getRoomId());
-        if (request.getBeforeTimestamp() > 0) {
-            filter = Filters.and(filter, Filters.lt("timestamp", request.getBeforeTimestamp()));
+        if (request.getRoomId().isBlank()) {
+            responseObserver.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Thiếu room_id").asRuntimeException());
+            return;
         }
 
-        List<Document> docs = messageCollection.find(filter)
-                .sort(Sorts.descending("timestamp"))
-                .limit(limit + 1)
-                .into(new ArrayList<>());
+        try {
+            int limit = request.getLimit() <= 0 ? 50 : Math.min(request.getLimit(), 100);
 
-        boolean hasMore = docs.size() > limit;
-        if (hasMore) docs = docs.subList(0, limit);
+            Bson filter = Filters.eq("room_id", request.getRoomId());
+            if (request.getBeforeTimestamp() > 0) {
+                filter = Filters.and(filter, Filters.lt("timestamp", request.getBeforeTimestamp()));
+            }
 
-        HistoryResponse.Builder builder = HistoryResponse.newBuilder().setHasMore(hasMore);
-        for (Document d : docs) {
-            builder.addMessages(ChatMessage.newBuilder()
-                    .setMessageId(d.getString("_id"))
-                    .setRoomId(d.getString("room_id"))
-                    .setSenderId(d.getString("sender_id"))
-                    .setContent(d.getString("content"))
-                    .setTimestamp(d.getLong("timestamp")));
+            List<Document> docs = messageCollection.find(filter)
+                    .sort(Sorts.descending("timestamp"))
+                    .limit(limit + 1)
+                    .into(new ArrayList<>());
+
+            boolean hasMore = docs.size() > limit;
+            if (hasMore) docs = docs.subList(0, limit);
+
+            HistoryResponse.Builder builder = HistoryResponse.newBuilder().setHasMore(hasMore);
+            for (Document d : docs) {
+                builder.addMessages(ChatMessage.newBuilder()
+                        .setMessageId(d.getString("_id"))
+                        .setRoomId(d.getString("room_id"))
+                        .setSenderId(d.getString("sender_id"))
+                        .setContent(d.getString("content"))
+                        .setTimestamp(d.getLong("timestamp")));
+            }
+
+            responseObserver.onNext(builder.build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            log.error("Truy vấn lịch sử phòng {} thất bại", request.getRoomId(), e);
+            responseObserver.onError(Status.INTERNAL
+                    .withDescription("Không lấy được lịch sử tin nhắn").asRuntimeException());
         }
-
-        responseObserver.onNext(builder.build());
-        responseObserver.onCompleted();
     }
 }
