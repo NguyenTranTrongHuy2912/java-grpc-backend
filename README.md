@@ -81,6 +81,14 @@ java-grpc-backend/
 
 ## 📡 gRPC Interface Specification
 
-- **Service:** `chat.ChatService`
-- **Method:** `SendMessage(ChatMessage) returns (ChatResponse)`
-- **Port:** `50051`
+- **Service:** `chat.ChatService` (port `50051`)
+
+| Method | Mô tả |
+|---|---|
+| `SendMessage(ChatMessage) returns (ChatResponse)` | Lưu tin nhắn. Gửi lại cùng `message_id` vẫn thành công (idempotent). Trả `INVALID_ARGUMENT` nếu thiếu `message_id`, `room_id`, `sender_id` hoặc `content`. |
+| `GetMessageHistory(HistoryRequest) returns (HistoryResponse)` | Lấy tin nhắn theo `room_id`, mới nhất trước. Tham số `limit` (mặc định 50, tối đa 100) và `before_timestamp` để phân trang; `has_more` cho biết còn trang cũ hơn. |
+
+## ⚙️ Cấu hình
+
+Copy `.env.example` thành `.env`, hoặc truyền `MONGO_URI` và `MONGO_DB_NAME` bằng biến môi trường khi deploy (Docker, cloud).
+
