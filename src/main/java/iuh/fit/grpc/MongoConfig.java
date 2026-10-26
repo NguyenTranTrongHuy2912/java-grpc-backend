@@ -6,14 +6,23 @@ import com.mongodb.client.MongoDatabase;
 import io.github.cdimascio.dotenv.Dotenv;
 
 public class MongoConfig {
-    // Tải thông tin cấu hình từ file .env
-    private static final Dotenv dotenv = Dotenv.load();
-    private static final String CONNECTION_STRING = dotenv.get("MONGO_URI");
-    private static final String DATABASE_NAME = dotenv.get("MONGO_DB_NAME");
+    private static final Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
+    private static final String CONNECTION_STRING = require("MONGO_URI");
+    private static final String DATABASE_NAME = require("MONGO_DB_NAME");
 
     private static MongoClient mongoClient = null;
 
-    public static MongoDatabase getDatabase() {
+    private static String require(String key) {
+        String value = dotenv.get(key);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(
+                    "Thiếu biến cấu hình " + key + ". Hãy tạo file .env từ .env.example "
+                            + "hoặc đặt biến này trong môi trường chạy.");
+        }
+        return value;
+    }
+
+    public static synchronized MongoDatabase getDatabase() {
         if (mongoClient == null) {
             mongoClient = MongoClients.create(CONNECTION_STRING);
             System.out.println(">>> Đã kết nối thành công tới MongoDB Database: " + DATABASE_NAME);
