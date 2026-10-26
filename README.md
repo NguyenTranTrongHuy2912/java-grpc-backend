@@ -83,12 +83,15 @@ java-grpc-backend/
 
 - **Service:** `chat.ChatService` (port `50051`)
 
-| Method | Mô tả |
-|---|---|
-| `SendMessage(ChatMessage) returns (ChatResponse)` | Lưu tin nhắn. Gửi lại cùng `message_id` vẫn thành công (idempotent). Trả `INVALID_ARGUMENT` nếu thiếu `message_id`, `room_id`, `sender_id` hoặc `content`. |
-| `GetMessageHistory(HistoryRequest) returns (HistoryResponse)` | Lấy tin nhắn theo `room_id`, mới nhất trước. Tham số `limit` (mặc định 50, tối đa 100) và `before_timestamp` để phân trang; `has_more` cho biết còn trang cũ hơn. |
+| Method                                                        | Description                                                                                                                                                                                                                        |
+|---------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `SendMessage(ChatMessage) returns (ChatResponse)`             | Stores a message. Resending the same `message_id` still succeeds (idempotent). Returns `INVALID_ARGUMENT` if `message_id`, `room_id`, `sender_id`, or `content` is missing.                                                        |
+| `GetMessageHistory(HistoryRequest) returns (HistoryResponse)` | Retrieves messages for a `room_id`, newest first. Use `limit` (default 50, max 100) and `before_timestamp` for pagination; `has_more` indicates whether older messages remain. Returns `INVALID_ARGUMENT` if `room_id` is missing. |
 
-## ⚙️ Cấu hình
+---
 
-Copy `.env.example` thành `.env`, hoặc truyền `MONGO_URI` và `MONGO_DB_NAME` bằng biến môi trường khi deploy (Docker, cloud).
+## ⚙️ Configuration
 
+Copy `.env.example` to `.env`, or pass `MONGO_URI` and `MONGO_DB_NAME` as environment variables when deploying (Docker, cloud).
+
+If either variable is missing, the server fails fast at startup with a clear error message instead of an obscure driver error.
