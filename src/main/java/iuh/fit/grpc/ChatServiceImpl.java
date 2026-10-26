@@ -1,10 +1,13 @@
 package iuh.fit.grpc;
 
+import com.mongodb.ErrorCategory;
+import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Indexes;
 import com.mongodb.client.model.Sorts;
+import io.grpc.Status;
 import iuh.fit.grpc.chat.ChatMessage;
 import iuh.fit.grpc.chat.ChatResponse;
 import iuh.fit.grpc.chat.ChatServiceGrpc;
@@ -13,11 +16,14 @@ import iuh.fit.grpc.chat.HistoryResponse;
 import io.grpc.stub.StreamObserver;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
 
 public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
+    private static final Logger log = LoggerFactory.getLogger(ChatServiceImpl.class);
     private final MongoDatabase database = MongoConfig.getDatabase();
     private final MongoCollection<Document> messageCollection = database.getCollection("messages");
 
@@ -28,32 +34,40 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     }
 
     @Override
-    public void sendMessage(ChatMessage request, StreamObserver<ChatResponse> responseObserver) {
+    public void sendMessage(ChatMessage request, StreamObserver<ChatResponse> out) {
+        if (request.getMessageId().isBlank() || request.getRoomId().isBlank()
+                || request.getSenderId().isBlank() || request.getContent().isBlank()) {
+            out.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Thiếu message_id, room_id, sender_id hoặc content")
+                    .asRuntimeException());
+            return;
+        }
         try {
-            Document messageDoc = new Document()
+            messageCollection.insertOne(new Document()
                     .append("_id", request.getMessageId())
                     .append("room_id", request.getRoomId())
                     .append("sender_id", request.getSenderId())
                     .append("content", request.getContent())
-                    .append("timestamp", request.getTimestamp());
-            messageCollection.insertOne(messageDoc);
-
-            responseObserver.onNext(ChatResponse.newBuilder()
-                    .setMessageId(request.getMessageId())
-                    .setIsSuccess(true)
-                    .setStatusMessage("Đã lưu tin nhắn")
-                    .setTimestamp(System.currentTimeMillis())
-                    .build());
-            responseObserver.onCompleted();
+                    .append("timestamp", request.getTimestamp()));
+        } catch (MongoWriteException e) {
+            // Gửi lại cùng message_id: coi như đã lưu, không báo lỗi
+            if (e.getError().getCategory() != ErrorCategory.DUPLICATE_KEY) {
+                log.error("Lưu tin nhắn {} thất bại", request.getMessageId(), e);
+                out.onError(Status.INTERNAL.withDescription("Không lưu được tin nhắn").asRuntimeException());
+                return;
+            }
         } catch (Exception e) {
-            responseObserver.onNext(ChatResponse.newBuilder()
-                    .setMessageId(request.getMessageId())
-                    .setIsSuccess(false)
-                    .setStatusMessage("Lưu thất bại: " + e.getMessage())
-                    .setTimestamp(System.currentTimeMillis())
-                    .build());
-            responseObserver.onCompleted();
+            log.error("Lưu tin nhắn {} thất bại", request.getMessageId(), e);
+            out.onError(Status.INTERNAL.withDescription("Không lưu được tin nhắn").asRuntimeException());
+            return;
         }
+        out.onNext(ChatResponse.newBuilder()
+                .setMessageId(request.getMessageId())
+                .setIsSuccess(true)
+                .setStatusMessage("Đã lưu tin nhắn")
+                .setTimestamp(request.getTimestamp())   // trả timestamp đã lưu, không phải giờ phản hồi
+                .build());
+        out.onCompleted();
     }
 
     @Override
