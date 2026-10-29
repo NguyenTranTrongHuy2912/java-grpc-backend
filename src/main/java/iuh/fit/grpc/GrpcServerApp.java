@@ -11,6 +11,7 @@ public class GrpcServerApp {
 
         Server server = ServerBuilder.forPort(port)
                 .addService(new ChatServiceImpl())
+                .addService(new AuthServiceImpl())
                 .build();
 
         System.out.println("Starting Java gRPC Server on port " + port + "...");
