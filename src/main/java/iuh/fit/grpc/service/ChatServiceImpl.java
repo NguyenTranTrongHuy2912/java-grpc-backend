@@ -1,4 +1,4 @@
-package iuh.fit.grpc;
+package iuh.fit.grpc.service;
 
 import com.mongodb.ErrorCategory;
 import com.mongodb.MongoWriteException;
@@ -14,6 +14,7 @@ import iuh.fit.grpc.chat.ChatServiceGrpc;
 import iuh.fit.grpc.chat.HistoryRequest;
 import iuh.fit.grpc.chat.HistoryResponse;
 import io.grpc.stub.StreamObserver;
+import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.slf4j.Logger;
