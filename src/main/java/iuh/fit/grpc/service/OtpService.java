@@ -9,7 +9,7 @@ import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.ReturnDocument;
 import com.mongodb.client.model.Updates;
 import io.grpc.Status;
-import iuh.fit.grpc.EmailSender;
+import iuh.fit.grpc.mail.EmailSender;
 import iuh.fit.grpc.config.Env;
 import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
