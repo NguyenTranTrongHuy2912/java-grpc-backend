@@ -1,4 +1,4 @@
-package iuh.fit.grpc;
+package iuh.fit.grpc.service;
 
 import at.favre.lib.crypto.bcrypt.BCrypt;
 import com.mongodb.ErrorCategory;
@@ -8,49 +8,85 @@ import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import iuh.fit.grpc.chat.AuthResponse;
 import iuh.fit.grpc.chat.AuthServiceGrpc;
 import iuh.fit.grpc.chat.LoginRequest;
 import iuh.fit.grpc.chat.RegisterRequest;
+import iuh.fit.grpc.chat.RequestOtpRequest;
+import iuh.fit.grpc.chat.RequestOtpResponse;
+import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
     private static final Logger log = LoggerFactory.getLogger(AuthServiceImpl.class);
-    private static final Pattern PHONE = Pattern.compile("^0\\d{9}$");
+    private static final Pattern EMAIL = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
     private static final int BCRYPT_COST = 12;
-    // Hash giả để đăng nhập tài khoản không tồn tại vẫn tốn thời gian như tài khoản có thật
     private static final String DUMMY_HASH =
             BCrypt.withDefaults().hashToString(BCRYPT_COST, "dummy-password".toCharArray());
 
     private final MongoCollection<Document> users =
             MongoConfig.getDatabase().getCollection("users");
+    private final OtpService otpService;
 
-    public AuthServiceImpl() {
+    public AuthServiceImpl(OtpService otpService) {
+        this.otpService = otpService;
         users.createIndex(Indexes.ascending("account"), new IndexOptions().unique(true));
     }
 
-    static String normalizePhone(String raw) {
-        String s = raw.replaceAll("[\\s.\\-()]", "");
-        if (s.startsWith("+84")) s = "0" + s.substring(3);
-        else if (s.startsWith("84") && s.length() == 11) s = "0" + s.substring(2);
-        return s;
+    static String normalizeEmail(String raw) {
+        return raw.trim().toLowerCase(Locale.ROOT);
+    }
+
+    static boolean isValidEmail(String email) {
+        return email.length() <= 254 && EMAIL.matcher(email).matches();
+    }
+
+    @Override
+    public void requestOtp(RequestOtpRequest request, StreamObserver<RequestOtpResponse> out) {
+        String account = normalizeEmail(request.getAccount());
+        if (!isValidEmail(account)) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Email không hợp lệ").asRuntimeException());
+            return;
+        }
+        try {
+            if (users.find(Filters.eq("account", account)).first() != null) {
+                out.onError(Status.ALREADY_EXISTS
+                        .withDescription("Email đã được đăng ký").asRuntimeException());
+                return;
+            }
+            otpService.send(account);
+        } catch (StatusRuntimeException e) {
+            out.onError(e);
+            return;
+        } catch (Exception e) {
+            log.error("Yêu cầu OTP thất bại", e);
+            out.onError(Status.INTERNAL.withDescription("Không gửi được mã").asRuntimeException());
+            return;
+        }
+        out.onNext(RequestOtpResponse.newBuilder()
+                .setExpiresInSeconds(OtpService.TTL_SECONDS)
+                .setResendAfterSeconds(OtpService.RESEND_SECONDS)
+                .build());
+        out.onCompleted();
     }
 
     @Override
     public void register(RegisterRequest request, StreamObserver<AuthResponse> out) {
-        String account = normalizePhone(request.getAccount());
+        String account = normalizeEmail(request.getAccount());
         String displayName = request.getDisplayName().trim();
         String password = request.getPassword();
+        String otpCode = request.getOtpCode().trim();
 
-        if (!PHONE.matcher(account).matches()) {
-            out.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Số điện thoại không hợp lệ").asRuntimeException());
+        if (!isValidEmail(account)) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Email không hợp lệ").asRuntimeException());
             return;
         }
         if (displayName.isEmpty() || displayName.length() > 50) {
@@ -61,6 +97,21 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         if (password.length() < 6 || password.length() > 64) {
             out.onError(Status.INVALID_ARGUMENT
                     .withDescription("Mật khẩu phải từ 6 đến 64 ký tự").asRuntimeException());
+            return;
+        }
+        if (otpCode.isEmpty()) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu mã OTP").asRuntimeException());
+            return;
+        }
+
+        try {
+            otpService.verify(account, otpCode);
+        } catch (StatusRuntimeException e) {
+            out.onError(e);
+            return;
+        } catch (Exception e) {
+            log.error("Kiểm tra OTP thất bại", e);
+            out.onError(Status.INTERNAL.withDescription("Không kiểm tra được mã").asRuntimeException());
             return;
         }
 
@@ -76,7 +127,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         } catch (MongoWriteException e) {
             if (e.getError().getCategory() == ErrorCategory.DUPLICATE_KEY) {
                 out.onError(Status.ALREADY_EXISTS
-                        .withDescription("Số điện thoại đã được đăng ký").asRuntimeException());
+                        .withDescription("Email đã được đăng ký").asRuntimeException());
             } else {
                 log.error("Đăng ký tài khoản thất bại", e);
                 out.onError(Status.INTERNAL.withDescription("Không tạo được tài khoản").asRuntimeException());
@@ -94,7 +145,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
 
     @Override
     public void login(LoginRequest request, StreamObserver<AuthResponse> out) {
-        String account = normalizePhone(request.getAccount());
+        String account = normalizeEmail(request.getAccount());
         String password = request.getPassword();
 
         if (account.isEmpty() || password.isEmpty() || password.length() > 64) {
