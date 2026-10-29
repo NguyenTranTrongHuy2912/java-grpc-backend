@@ -1,4 +1,4 @@
-package iuh.fit.grpc;
+package iuh.fit.grpc.config;
 
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
