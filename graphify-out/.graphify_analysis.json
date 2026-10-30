@@ -1,0 +1,240 @@
+{
+  "communities": {
+    "0": [
+      "authenticator",
+      "internetaddress",
+      "io_github_cdimascio_dotenv_dotenv",
+      "ioexception",
+      "jakarta_mail_passwordauthentication",
+      "jakarta_mail_session",
+      "message",
+      "mimemessage",
+      "properties",
+      "server",
+      "serverbuilder",
+      "src_main_java_iuh_fit_grpc_config_env",
+      "src_main_java_iuh_fit_grpc_config_env_env",
+      "src_main_java_iuh_fit_grpc_config_env_env_env",
+      "src_main_java_iuh_fit_grpc_config_env_env_get",
+      "src_main_java_iuh_fit_grpc_config_env_env_require",
+      "src_main_java_iuh_fit_grpc_grpcserverapp",
+      "src_main_java_iuh_fit_grpc_grpcserverapp_grpcserverapp",
+      "src_main_java_iuh_fit_grpc_grpcserverapp_grpcserverapp_main",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender_java_override",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender_sendotp",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender_smtpemailsender",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender_smtpemailsender_object_authenticator_l32",
+      "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender_smtpemailsender_object_authenticator_l32_getpasswordauthentication",
+      "transport"
+    ],
+    "1": [
+      "authservicegrpc",
+      "authserviceimplbase",
+      "bcrypt",
+      "indexes",
+      "indexoptions",
+      "iuh_fit_grpc_chat_authresponse",
+      "iuh_fit_grpc_chat_loginrequest",
+      "iuh_fit_grpc_chat_registerrequest",
+      "iuh_fit_grpc_chat_requestotprequest",
+      "iuh_fit_grpc_chat_requestotpresponse",
+      "java_util_regex_pattern",
+      "locale",
+      "mongowriteexception",
+      "org_bson_document",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl_isvalidemail",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl_login",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl_normalizeemail",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl_register",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl_requestotp",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_java_override",
+      "src_main_java_iuh_fit_grpc_service_otpservice_otpservice_verify",
+      "statusruntimeexception",
+      "uuid"
+    ],
+    "2": [
+      "arraylist",
+      "bson",
+      "chatservicegrpc",
+      "chatserviceimplbase",
+      "com_mongodb_client_mongocollection",
+      "errorcategory",
+      "filters",
+      "io_grpc_stub_streamobserver",
+      "iuh_fit_grpc_chat_chatmessage",
+      "iuh_fit_grpc_chat_chatresponse",
+      "iuh_fit_grpc_chat_historyrequest",
+      "iuh_fit_grpc_chat_historyresponse",
+      "list",
+      "sorts",
+      "src_main_java_iuh_fit_grpc_service_chatserviceimpl",
+      "src_main_java_iuh_fit_grpc_service_chatserviceimpl_chatserviceimpl",
+      "src_main_java_iuh_fit_grpc_service_chatserviceimpl_chatserviceimpl_chatserviceimpl",
+      "src_main_java_iuh_fit_grpc_service_chatserviceimpl_chatserviceimpl_getmessagehistory",
+      "src_main_java_iuh_fit_grpc_service_chatserviceimpl_chatserviceimpl_sendmessage",
+      "src_main_java_iuh_fit_grpc_service_chatserviceimpl_java_override",
+      "status"
+    ],
+    "3": [
+      "date",
+      "findoneandupdateoptions",
+      "hexformat",
+      "mac",
+      "messagedigest",
+      "replaceoptions",
+      "returndocument",
+      "secretkeyspec",
+      "src_main_java_iuh_fit_grpc_service_otpservice",
+      "standardcharsets",
+      "timeunit",
+      "updates"
+    ],
+    "4": [
+      "java_security_securerandom",
+      "src_main_java_iuh_fit_grpc_mail_emailsender",
+      "src_main_java_iuh_fit_grpc_mail_emailsender_emailsender",
+      "src_main_java_iuh_fit_grpc_mail_emailsender_emailsender_sendotp",
+      "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl_authserviceimpl",
+      "src_main_java_iuh_fit_grpc_service_otpservice_otpservice",
+      "src_main_java_iuh_fit_grpc_service_otpservice_otpservice_hash",
+      "src_main_java_iuh_fit_grpc_service_otpservice_otpservice_otpservice",
+      "src_main_java_iuh_fit_grpc_service_otpservice_otpservice_send"
+    ],
+    "5": [
+      "com_mongodb_client_mongoclient",
+      "com_mongodb_client_mongodatabase",
+      "mongoclients",
+      "src_main_java_iuh_fit_grpc_config_mongoconfig",
+      "src_main_java_iuh_fit_grpc_config_mongoconfig_mongoconfig",
+      "src_main_java_iuh_fit_grpc_config_mongoconfig_mongoconfig_getdatabase",
+      "src_main_java_iuh_fit_grpc_config_mongoconfig_mongoconfig_require"
+    ],
+    "6": [
+      "loggerfactory",
+      "org_slf4j_logger",
+      "src_main_java_iuh_fit_grpc_mail_consoleemailsender",
+      "src_main_java_iuh_fit_grpc_mail_consoleemailsender_consoleemailsender",
+      "src_main_java_iuh_fit_grpc_mail_consoleemailsender_consoleemailsender_sendotp",
+      "src_main_java_iuh_fit_grpc_mail_consoleemailsender_java_override"
+    ],
+    "7": [
+      "pkg_iuh_fit_java_grpc_backend"
+    ]
+  },
+  "cohesion": {
+    "0": 0.10541310541310542,
+    "1": 0.13,
+    "2": 0.13333333333333333,
+    "3": 0.16666666666666666,
+    "4": 0.2777777777777778,
+    "5": 0.38095238095238093,
+    "6": 0.4,
+    "7": 1.0
+  },
+  "gods": [
+    {
+      "id": "src_main_java_iuh_fit_grpc_service_authserviceimpl_authserviceimpl",
+      "label": "AuthServiceImpl",
+      "degree": 14
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_service_otpservice_otpservice",
+      "label": "OtpService",
+      "degree": 14
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_service_chatserviceimpl_chatserviceimpl",
+      "label": "ChatServiceImpl",
+      "degree": 10
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_config_env_env",
+      "label": "Env",
+      "degree": 8
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_config_mongoconfig_mongoconfig",
+      "label": "MongoConfig",
+      "degree": 8
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_mail_emailsender_emailsender",
+      "label": "EmailSender",
+      "degree": 8
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_mail_consoleemailsender_consoleemailsender",
+      "label": "ConsoleEmailSender",
+      "degree": 6
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender",
+      "label": "SmtpEmailSender",
+      "degree": 6
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_grpcserverapp_grpcserverapp",
+      "label": "GrpcServerApp",
+      "degree": 2
+    },
+    {
+      "id": "src_main_java_iuh_fit_grpc_mail_smtpemailsender_smtpemailsender_smtpemailsender_object_authenticator_l32",
+      "label": "Authenticator",
+      "degree": 2
+    }
+  ],
+  "surprises": [
+    {
+      "source": "ConsoleEmailSender",
+      "target": "EmailSender",
+      "source_files": [
+        "src/main/java/iuh/fit/grpc/mail/ConsoleEmailSender.java",
+        "src/main/java/iuh/fit/grpc/mail/EmailSender.java"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "implements",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "SmtpEmailSender",
+      "target": "EmailSender",
+      "source_files": [
+        "src/main/java/iuh/fit/grpc/mail/SmtpEmailSender.java",
+        "src/main/java/iuh/fit/grpc/mail/EmailSender.java"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "implements",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "AuthServiceImpl",
+      "target": "OtpService",
+      "source_files": [
+        "src/main/java/iuh/fit/grpc/service/AuthServiceImpl.java",
+        "src/main/java/iuh/fit/grpc/service/OtpService.java"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "OtpService",
+      "target": "EmailSender",
+      "source_files": [
+        "src/main/java/iuh/fit/grpc/service/OtpService.java",
+        "src/main/java/iuh/fit/grpc/mail/EmailSender.java"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "cross-file semantic connection"
+    }
+  ],
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
+}
