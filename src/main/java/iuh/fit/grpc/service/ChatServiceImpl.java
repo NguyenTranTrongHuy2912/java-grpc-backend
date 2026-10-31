@@ -5,15 +5,28 @@ import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
+import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.Sorts;
+import com.mongodb.client.model.Updates;
 import io.grpc.Status;
+import io.grpc.stub.StreamObserver;
 import iuh.fit.grpc.chat.ChatMessage;
 import iuh.fit.grpc.chat.ChatResponse;
 import iuh.fit.grpc.chat.ChatServiceGrpc;
+import iuh.fit.grpc.chat.CreateRoomRequest;
 import iuh.fit.grpc.chat.HistoryRequest;
 import iuh.fit.grpc.chat.HistoryResponse;
-import io.grpc.stub.StreamObserver;
+import iuh.fit.grpc.chat.ListRoomsRequest;
+import iuh.fit.grpc.chat.ListRoomsResponse;
+import iuh.fit.grpc.chat.MarkRoomReadRequest;
+import iuh.fit.grpc.chat.MarkRoomReadResponse;
+import iuh.fit.grpc.chat.Room;
+import iuh.fit.grpc.chat.RoomType;
+import iuh.fit.grpc.chat.SearchUsersRequest;
+import iuh.fit.grpc.chat.SearchUsersResponse;
+import iuh.fit.grpc.chat.UserSummary;
 import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -21,18 +34,49 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private static final Logger log = LoggerFactory.getLogger(ChatServiceImpl.class);
+
+    // Quy tắc nghiệp vụ — chỉnh ở đây nếu muốn đổi
+    private static final int MAX_GROUP_NAME = 50;
+    private static final int MIN_GROUP_OTHER_MEMBERS = 2;   // không tính người tạo => nhóm tối thiểu 3 người
+    private static final int MAX_GROUP_MEMBERS = 100;
+    private static final int MIN_SEARCH_LENGTH = 2;
+    private static final int MAX_SEARCH_LENGTH = 100;
+    private static final int DEFAULT_SEARCH_LIMIT = 10;
+    private static final int MAX_SEARCH_LIMIT = 20;
+    private static final int MAX_ROOMS_PER_LIST = 200;
+
     private final MongoDatabase database = MongoConfig.getDatabase();
     private final MongoCollection<Document> messageCollection = database.getCollection("messages");
+    private final MongoCollection<Document> roomCollection = database.getCollection("rooms");
+    private final MongoCollection<Document> userCollection = database.getCollection("users");
 
     public ChatServiceImpl() {
         messageCollection.createIndex(Indexes.compoundIndex(
                 Indexes.ascending("room_id"),
                 Indexes.descending("timestamp")));
+        // Liệt kê phòng của một người, sắp theo hoạt động gần nhất
+        roomCollection.createIndex(Indexes.compoundIndex(
+                Indexes.ascending("member_ids"),
+                Indexes.descending("updated_at")));
+        // Mỗi cặp người dùng chỉ có tối đa một phòng 1-1 (phòng nhóm không có direct_key nên bị bỏ qua)
+        roomCollection.createIndex(Indexes.ascending("direct_key"),
+                new IndexOptions().unique(true).sparse(true));
     }
+
+    // ------------------------------------------------------------------ Tin nhắn
 
     @Override
     public void sendMessage(ChatMessage request, StreamObserver<ChatResponse> out) {
@@ -43,7 +87,21 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .asRuntimeException());
             return;
         }
+
+        try {
+            Status denied = checkMembership(request.getRoomId(), request.getSenderId());
+            if (denied != null) {
+                out.onError(denied.asRuntimeException());
+                return;
+            }
+        } catch (Exception e) {
+            log.error("Kiểm tra thành viên phòng {} thất bại", request.getRoomId(), e);
+            out.onError(Status.INTERNAL.withDescription("Không gửi được tin nhắn").asRuntimeException());
+            return;
+        }
+
         long savedTimestamp = request.getTimestamp();
+        boolean inserted = false;
         try {
             messageCollection.insertOne(new Document()
                     .append("_id", request.getMessageId())
@@ -51,6 +109,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .append("sender_id", request.getSenderId())
                     .append("content", request.getContent())
                     .append("timestamp", request.getTimestamp()));
+            inserted = true;
         } catch (MongoWriteException e) {
             if (e.getError().getCategory() != ErrorCategory.DUPLICATE_KEY) {
                 log.error("Lưu tin nhắn {} thất bại", request.getMessageId(), e);
@@ -71,6 +130,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             out.onError(Status.INTERNAL.withDescription("Không lưu được tin nhắn").asRuntimeException());
             return;
         }
+
+        if (inserted) {
+            updateLastMessage(request);
+        }
+
         out.onNext(ChatResponse.newBuilder()
                 .setMessageId(request.getMessageId())
                 .setIsSuccess(true)
@@ -80,15 +144,42 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         out.onCompleted();
     }
 
+    /** Cập nhật "tin cuối" của phòng. Lỗi ở đây không làm hỏng việc gửi vì tin đã được lưu. */
+    private void updateLastMessage(ChatMessage m) {
+        try {
+            roomCollection.updateOne(
+                    Filters.and(
+                            Filters.eq("_id", m.getRoomId()),
+                            Filters.or(
+                                    Filters.exists("last_message", false),
+                                    Filters.lt("last_message.timestamp", m.getTimestamp()))),
+                    Updates.combine(
+                            Updates.set("last_message", new Document()
+                                    .append("message_id", m.getMessageId())
+                                    .append("sender_id", m.getSenderId())
+                                    .append("content", m.getContent())
+                                    .append("timestamp", m.getTimestamp())),
+                            Updates.max("updated_at", m.getTimestamp())));
+        } catch (Exception e) {
+            log.warn("Không cập nhật được tin cuối của phòng {}", m.getRoomId(), e);
+        }
+    }
+
     @Override
     public void getMessageHistory(HistoryRequest request, StreamObserver<HistoryResponse> responseObserver) {
-        if (request.getRoomId().isBlank()) {
+        if (request.getRoomId().isBlank() || request.getUserId().isBlank()) {
             responseObserver.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Thiếu room_id").asRuntimeException());
+                    .withDescription("Thiếu room_id hoặc user_id").asRuntimeException());
             return;
         }
 
         try {
+            Status denied = checkMembership(request.getRoomId(), request.getUserId());
+            if (denied != null) {
+                responseObserver.onError(denied.asRuntimeException());
+                return;
+            }
+
             int limit = request.getLimit() <= 0 ? 50 : Math.min(request.getLimit(), 100);
 
             Bson filter = Filters.eq("room_id", request.getRoomId());
@@ -121,5 +212,305 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             responseObserver.onError(Status.INTERNAL
                     .withDescription("Không lấy được lịch sử tin nhắn").asRuntimeException());
         }
+    }
+
+    // ------------------------------------------------------------ Tìm người dùng
+
+    @Override
+    public void searchUsers(SearchUsersRequest request, StreamObserver<SearchUsersResponse> out) {
+        String requesterId = request.getRequesterId().trim();
+        String query = request.getQuery().trim();
+        if (requesterId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu requester_id"));
+            return;
+        }
+        if (query.length() < MIN_SEARCH_LENGTH || query.length() > MAX_SEARCH_LENGTH) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription(
+                    "Từ khóa phải từ " + MIN_SEARCH_LENGTH + " đến " + MAX_SEARCH_LENGTH + " ký tự"));
+            return;
+        }
+        int limit = request.getLimit() <= 0 ? DEFAULT_SEARCH_LIMIT
+                : Math.min(request.getLimit(), MAX_SEARCH_LIMIT);
+
+        try {
+            Bson match;
+            if (query.contains("@")) {
+                // Email được lưu đã chuẩn hóa (chữ thường) => khớp theo tiền tố
+                match = Filters.regex("account", "^" + Pattern.quote(AuthServiceImpl.normalizeEmail(query)));
+            } else {
+                // Tên: chứa từ khóa, không phân biệt hoa thường
+                match = Filters.regex("display_name", Pattern.quote(query), "i");
+            }
+
+            SearchUsersResponse.Builder builder = SearchUsersResponse.newBuilder();
+            for (Document u : userCollection
+                    .find(Filters.and(match, Filters.ne("_id", requesterId)))
+                    .projection(Projections.include("display_name", "account"))
+                    .sort(Sorts.ascending("display_name"))
+                    .limit(limit)) {
+                builder.addUsers(UserSummary.newBuilder()
+                        .setUserId(u.getString("_id"))
+                        .setDisplayName(u.getString("display_name"))
+                        .setEmail(u.getString("account")));
+            }
+            out.onNext(builder.build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Tìm người dùng thất bại", e);
+            fail(out, Status.INTERNAL.withDescription("Không tìm được người dùng"));
+        }
+    }
+
+    // ------------------------------------------------------------------- Phòng
+
+    @Override
+    public void createRoom(CreateRoomRequest request, StreamObserver<Room> out) {
+        String creatorId = request.getCreatorId().trim();
+        if (creatorId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu creator_id"));
+            return;
+        }
+
+        Set<String> others = new LinkedHashSet<>();
+        for (String id : request.getMemberIdsList()) {
+            String trimmed = id.trim();
+            if (!trimmed.isEmpty() && !trimmed.equals(creatorId)) others.add(trimmed);
+        }
+
+        RoomType type = request.getType();
+        String name = request.getName().trim();
+        if (type == RoomType.ROOM_TYPE_DIRECT) {
+            if (others.size() != 1) {
+                fail(out, Status.INVALID_ARGUMENT.withDescription("Phòng 1-1 cần đúng một người còn lại"));
+                return;
+            }
+        } else if (type == RoomType.ROOM_TYPE_GROUP) {
+            if (name.isEmpty() || name.length() > MAX_GROUP_NAME) {
+                fail(out, Status.INVALID_ARGUMENT.withDescription(
+                        "Tên nhóm phải từ 1 đến " + MAX_GROUP_NAME + " ký tự"));
+                return;
+            }
+            if (others.size() < MIN_GROUP_OTHER_MEMBERS) {
+                fail(out, Status.INVALID_ARGUMENT.withDescription(
+                        "Nhóm cần ít nhất " + (MIN_GROUP_OTHER_MEMBERS + 1) + " thành viên"));
+                return;
+            }
+            if (others.size() + 1 > MAX_GROUP_MEMBERS) {
+                fail(out, Status.INVALID_ARGUMENT.withDescription(
+                        "Nhóm tối đa " + MAX_GROUP_MEMBERS + " thành viên"));
+                return;
+            }
+        } else {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Loại phòng không hợp lệ"));
+            return;
+        }
+
+        try {
+            List<String> memberIds = new ArrayList<>();
+            memberIds.add(creatorId);
+            memberIds.addAll(others);
+
+            if (userCollection.countDocuments(Filters.in("_id", memberIds)) != memberIds.size()) {
+                fail(out, Status.NOT_FOUND.withDescription("Có người dùng không tồn tại"));
+                return;
+            }
+
+            Document room;
+            Map<String, String> names = new HashMap<>();
+            if (type == RoomType.ROOM_TYPE_DIRECT) {
+                room = createOrGetDirectRoom(creatorId, memberIds);
+                names = loadDisplayNames(memberIds);
+            } else {
+                room = createGroupRoom(creatorId, name, memberIds);
+            }
+
+            out.onNext(buildRoom(room, creatorId, names));
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Tạo phòng thất bại", e);
+            fail(out, Status.INTERNAL.withDescription("Không tạo được phòng"));
+        }
+    }
+
+    private Document createOrGetDirectRoom(String creatorId, List<String> memberIds) {
+        String directKey = memberIds.stream().sorted().collect(Collectors.joining(":"));
+        Document existing = roomCollection.find(Filters.eq("direct_key", directKey)).first();
+        if (existing != null) return existing;
+
+        long now = System.currentTimeMillis();
+        Document room = new Document()
+                .append("_id", UUID.randomUUID().toString())
+                .append("type", "DIRECT")
+                .append("member_ids", memberIds)
+                .append("direct_key", directKey)
+                .append("created_by", creatorId)
+                .append("created_at", now)
+                .append("updated_at", now);
+        try {
+            roomCollection.insertOne(room);
+            return room;
+        } catch (MongoWriteException e) {
+            if (e.getError().getCategory() == ErrorCategory.DUPLICATE_KEY) {
+                // Hai người cùng mở phòng một lúc: lấy phòng đã được tạo trước
+                return roomCollection.find(Filters.eq("direct_key", directKey)).first();
+            }
+            throw e;
+        }
+    }
+
+    private Document createGroupRoom(String creatorId, String name, List<String> memberIds) {
+        long now = System.currentTimeMillis();
+        Document room = new Document()
+                .append("_id", UUID.randomUUID().toString())
+                .append("type", "GROUP")
+                .append("name", name)
+                .append("member_ids", memberIds)
+                .append("created_by", creatorId)
+                .append("created_at", now)
+                .append("updated_at", now);
+        roomCollection.insertOne(room);
+        return room;
+    }
+
+    @Override
+    public void listRooms(ListRoomsRequest request, StreamObserver<ListRoomsResponse> out) {
+        String userId = request.getUserId().trim();
+        if (userId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu user_id"));
+            return;
+        }
+        try {
+            List<Document> rooms = roomCollection.find(Filters.eq("member_ids", userId))
+                    .sort(Sorts.descending("updated_at"))
+                    .limit(MAX_ROOMS_PER_LIST)
+                    .into(new ArrayList<>());
+
+            // Gom id người còn lại của các phòng 1-1 để lấy tên một lần
+            Set<String> peerIds = new HashSet<>();
+            for (Document d : rooms) {
+                if ("DIRECT".equals(d.getString("type"))) {
+                    peerIds.addAll(d.getList("member_ids", String.class));
+                }
+            }
+            Map<String, String> names = loadDisplayNames(peerIds);
+
+            ListRoomsResponse.Builder builder = ListRoomsResponse.newBuilder();
+            for (Document d : rooms) {
+                builder.addRooms(buildRoom(d, userId, names));
+            }
+            out.onNext(builder.build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Liệt kê phòng của {} thất bại", userId, e);
+            fail(out, Status.INTERNAL.withDescription("Không lấy được danh sách phòng"));
+        }
+    }
+
+    @Override
+    public void markRoomRead(MarkRoomReadRequest request, StreamObserver<MarkRoomReadResponse> out) {
+        String userId = request.getUserId().trim();
+        String roomId = request.getRoomId().trim();
+        if (userId.isEmpty() || roomId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu user_id hoặc room_id"));
+            return;
+        }
+        try {
+            Status denied = checkMembership(roomId, userId);
+            if (denied != null) {
+                fail(out, denied);
+                return;
+            }
+
+            long readUpTo = request.getReadUpToTimestamp();
+            if (readUpTo <= 0) {
+                // Không dựa vào đồng hồ của máy nào: lấy mốc thời gian của tin mới nhất trong phòng
+                Document latest = messageCollection.find(Filters.eq("room_id", roomId))
+                        .sort(Sorts.descending("timestamp"))
+                        .projection(Projections.include("timestamp"))
+                        .first();
+                readUpTo = latest == null ? 0 : latest.getLong("timestamp");
+            }
+            if (readUpTo > 0) {
+                // max => không bao giờ lùi mốc đã đọc
+                roomCollection.updateOne(Filters.eq("_id", roomId),
+                        Updates.max("last_read." + userId, readUpTo));
+            }
+            out.onNext(MarkRoomReadResponse.getDefaultInstance());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Đánh dấu đã đọc phòng {} thất bại", roomId, e);
+            fail(out, Status.INTERNAL.withDescription("Không đánh dấu được đã đọc"));
+        }
+    }
+
+    // ----------------------------------------------------------------- Tiện ích
+
+    /** null nếu hợp lệ; ngược lại trả về Status lỗi tương ứng. */
+    private Status checkMembership(String roomId, String userId) {
+        Document room = roomCollection.find(Filters.eq("_id", roomId))
+                .projection(Projections.include("member_ids"))
+                .first();
+        if (room == null) {
+            return Status.NOT_FOUND.withDescription("Phòng không tồn tại");
+        }
+        List<String> members = room.getList("member_ids", String.class);
+        if (members == null || !members.contains(userId)) {
+            return Status.PERMISSION_DENIED.withDescription("Bạn không thuộc phòng này");
+        }
+        return null;
+    }
+
+    private Map<String, String> loadDisplayNames(Collection<String> ids) {
+        Map<String, String> names = new HashMap<>();
+        if (ids.isEmpty()) return names;
+        for (Document u : userCollection.find(Filters.in("_id", ids))
+                .projection(Projections.include("display_name"))) {
+            names.put(u.getString("_id"), u.getString("display_name"));
+        }
+        return names;
+    }
+
+    private Room buildRoom(Document d, String viewerId, Map<String, String> names) {
+        String roomId = d.getString("_id");
+        List<String> members = d.getList("member_ids", String.class);
+        boolean direct = "DIRECT".equals(d.getString("type"));
+
+        String name;
+        if (direct) {
+            String peerId = members.stream().filter(m -> !m.equals(viewerId)).findFirst().orElse(viewerId);
+            name = names.getOrDefault(peerId, "Người dùng");
+        } else {
+            name = d.getString("name");
+        }
+
+        Room.Builder builder = Room.newBuilder()
+                .setRoomId(roomId)
+                .setType(direct ? RoomType.ROOM_TYPE_DIRECT : RoomType.ROOM_TYPE_GROUP)
+                .setName(name == null ? "" : name)
+                .addAllMemberIds(members);
+
+        Document last = d.get("last_message", Document.class);
+        if (last != null) {
+            builder.setLastMessageContent(last.getString("content"))
+                    .setLastMessageSenderId(last.getString("sender_id"))
+                    .setLastMessageTimestamp(last.getLong("timestamp"));
+        }
+
+        long readTs = 0;
+        Document lastRead = d.get("last_read", Document.class);
+        if (lastRead != null) {
+            Number n = lastRead.get(viewerId, Number.class);
+            if (n != null) readTs = n.longValue();
+        }
+        builder.setUnreadCount(messageCollection.countDocuments(Filters.and(
+                Filters.eq("room_id", roomId),
+                Filters.gt("timestamp", readTs),
+                Filters.ne("sender_id", viewerId))));
+
+        return builder.build();
+    }
+
+    private static void fail(StreamObserver<?> out, Status status) {
+        out.onError(status.asRuntimeException());
     }
 }
