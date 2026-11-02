@@ -23,6 +23,7 @@ import iuh.fit.grpc.chat.ListRoomsResponse;
 import iuh.fit.grpc.chat.MarkRoomReadRequest;
 import iuh.fit.grpc.chat.MarkRoomReadResponse;
 import iuh.fit.grpc.chat.Room;
+import iuh.fit.grpc.chat.RoomMember;
 import iuh.fit.grpc.chat.RoomType;
 import iuh.fit.grpc.chat.SearchUsersRequest;
 import iuh.fit.grpc.chat.SearchUsersResponse;
@@ -315,14 +316,10 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 return;
             }
 
-            Document room;
-            Map<String, String> names = new HashMap<>();
-            if (type == RoomType.ROOM_TYPE_DIRECT) {
-                room = createOrGetDirectRoom(creatorId, memberIds);
-                names = loadDisplayNames(memberIds);
-            } else {
-                room = createGroupRoom(creatorId, name, memberIds);
-            }
+            Document room = type == RoomType.ROOM_TYPE_DIRECT
+                    ? createOrGetDirectRoom(creatorId, memberIds)
+                    : createGroupRoom(creatorId, name, memberIds);
+            Map<String, String> names = loadDisplayNames(memberIds);
 
             out.onNext(buildRoom(room, creatorId, names));
             out.onCompleted();
@@ -385,14 +382,12 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .limit(MAX_ROOMS_PER_LIST)
                     .into(new ArrayList<>());
 
-            // Gom id người còn lại của các phòng 1-1 để lấy tên một lần
-            Set<String> peerIds = new HashSet<>();
+            // Gom id mọi thành viên của các phòng để lấy tên một lần
+            Set<String> memberIds = new HashSet<>();
             for (Document d : rooms) {
-                if ("DIRECT".equals(d.getString("type"))) {
-                    peerIds.addAll(d.getList("member_ids", String.class));
-                }
+                memberIds.addAll(d.getList("member_ids", String.class));
             }
-            Map<String, String> names = loadDisplayNames(peerIds);
+            Map<String, String> names = loadDisplayNames(memberIds);
 
             ListRoomsResponse.Builder builder = ListRoomsResponse.newBuilder();
             for (Document d : rooms) {
@@ -488,6 +483,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 .setType(direct ? RoomType.ROOM_TYPE_DIRECT : RoomType.ROOM_TYPE_GROUP)
                 .setName(name == null ? "" : name)
                 .addAllMemberIds(members);
+        for (String memberId : members) {
+            builder.addMembers(RoomMember.newBuilder()
+                    .setUserId(memberId)
+                    .setDisplayName(names.getOrDefault(memberId, "Người dùng")));
+        }
 
         Document last = d.get("last_message", Document.class);
         if (last != null) {
