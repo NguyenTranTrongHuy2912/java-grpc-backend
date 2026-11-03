@@ -38,14 +38,22 @@ public class SmtpEmailSender implements EmailSender {
     }
 
     @Override
-    public void sendOtp(String to, String code, int ttlMinutes) throws Exception {
+    public void sendOtp(String to, String code, int ttlMinutes, String purpose) throws Exception {
         MimeMessage msg = new MimeMessage(session);
         msg.setFrom(new InternetAddress(from));
         msg.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to, false));
-        msg.setSubject("Mã xác thực đăng ký", "UTF-8");
-        msg.setText("Mã xác thực của bạn là: " + code + "\n\n"
+        boolean reset = "reset_password".equals(purpose);
+        String subject = reset ? "Mã đặt lại mật khẩu ChatApp" : "Mã xác thực đăng ký ChatApp";
+        String intro = reset
+                ? "Bạn vừa yêu cầu đặt lại mật khẩu. Mã xác thực của bạn là: "
+                : "Mã xác thực đăng ký tài khoản của bạn là: ";
+        String ignore = reset
+                ? "Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này, mật khẩu của bạn vẫn an toàn."
+                : "Nếu bạn không yêu cầu, hãy bỏ qua email này.";
+        msg.setSubject(subject, "UTF-8");
+        msg.setText(intro + code + "\n\n"
                 + "Mã có hiệu lực trong " + ttlMinutes + " phút. "
-                + "Nếu bạn không yêu cầu, hãy bỏ qua email này.", "UTF-8");
+                + ignore, "UTF-8");
         Transport.send(msg);
     }
 }

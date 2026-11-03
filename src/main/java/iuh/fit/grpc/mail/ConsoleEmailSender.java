@@ -7,7 +7,7 @@ public class ConsoleEmailSender implements EmailSender {
     private static final Logger log = LoggerFactory.getLogger(ConsoleEmailSender.class);
 
     @Override
-    public void sendOtp(String to, String code, int ttlMinutes) {
-        log.info(">>> [DEV] OTP gửi tới {}: {} (hết hạn sau {} phút)", to, code, ttlMinutes);
+    public void sendOtp(String to, String code, int ttlMinutes, String purpose) {
+        log.info(">>> [DEV] OTP ({}) gửi tới {}: {} (hết hạn sau {} phút)", purpose, to, code, ttlMinutes);
     }
 }

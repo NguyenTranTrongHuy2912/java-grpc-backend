@@ -7,15 +7,20 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
+import com.mongodb.client.model.Updates;
+import com.mongodb.client.result.UpdateResult;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import iuh.fit.grpc.chat.AuthResponse;
 import iuh.fit.grpc.chat.AuthServiceGrpc;
 import iuh.fit.grpc.chat.LoginRequest;
+import iuh.fit.grpc.chat.OtpPurpose;
 import iuh.fit.grpc.chat.RegisterRequest;
 import iuh.fit.grpc.chat.RequestOtpRequest;
 import iuh.fit.grpc.chat.RequestOtpResponse;
+import iuh.fit.grpc.chat.ResetPasswordRequest;
+import iuh.fit.grpc.chat.ResetPasswordResponse;
 import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.slf4j.Logger;
@@ -57,12 +62,21 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
             return;
         }
         try {
-            if (users.find(Filters.eq("account", account)).first() != null) {
-                out.onError(Status.ALREADY_EXISTS
-                        .withDescription("Email đã được đăng ký").asRuntimeException());
-                return;
+            boolean exists = users.find(Filters.eq("account", account)).first() != null;
+            if (request.getPurpose() == OtpPurpose.OTP_PURPOSE_RESET_PASSWORD) {
+                // Chỉ gửi mail khi tài khoản tồn tại, nhưng luôn trả thành công
+                // để không lộ email nào đã đăng ký.
+                if (exists) {
+                    otpService.send(account, OtpService.PURPOSE_RESET_PASSWORD);
+                }
+            } else {
+                if (exists) {
+                    out.onError(Status.ALREADY_EXISTS
+                            .withDescription("Email đã được đăng ký").asRuntimeException());
+                    return;
+                }
+                otpService.send(account);
             }
-            otpService.send(account);
         } catch (StatusRuntimeException e) {
             out.onError(e);
             return;
@@ -174,5 +188,58 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
             log.error("Đăng nhập thất bại", e);
             out.onError(Status.INTERNAL.withDescription("Không đăng nhập được").asRuntimeException());
         }
+    }
+
+    @Override
+    public void resetPassword(ResetPasswordRequest request, StreamObserver<ResetPasswordResponse> out) {
+        String account = normalizeEmail(request.getAccount());
+        String password = request.getNewPassword();
+        String otpCode = request.getOtpCode().trim();
+
+        if (!isValidEmail(account)) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Email không hợp lệ").asRuntimeException());
+            return;
+        }
+        if (password.length() < 6 || password.length() > 64) {
+            out.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Mật khẩu phải từ 6 đến 64 ký tự").asRuntimeException());
+            return;
+        }
+        if (otpCode.isEmpty()) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu mã OTP").asRuntimeException());
+            return;
+        }
+
+        try {
+            otpService.verify(account, OtpService.PURPOSE_RESET_PASSWORD, otpCode);
+        } catch (StatusRuntimeException e) {
+            out.onError(e);
+            return;
+        } catch (Exception e) {
+            log.error("Kiểm tra OTP thất bại", e);
+            out.onError(Status.INTERNAL.withDescription("Không kiểm tra được mã").asRuntimeException());
+            return;
+        }
+
+        try {
+            String hash = BCrypt.withDefaults().hashToString(BCRYPT_COST, password.toCharArray());
+            UpdateResult result = users.updateOne(
+                    Filters.eq("account", account),
+                    Updates.combine(
+                            Updates.set("password_hash", hash),
+                            Updates.set("password_changed_at", System.currentTimeMillis())));
+            if (result.getMatchedCount() == 0) {
+                out.onError(Status.INVALID_ARGUMENT
+                        .withDescription("Mã không đúng hoặc đã hết hạn").asRuntimeException());
+                return;
+            }
+        } catch (Exception e) {
+            log.error("Đặt lại mật khẩu thất bại", e);
+            out.onError(Status.INTERNAL.withDescription("Không đổi được mật khẩu").asRuntimeException());
+            return;
+        }
+
+        out.onNext(ResetPasswordResponse.getDefaultInstance());
+        out.onCompleted();
     }
 }
