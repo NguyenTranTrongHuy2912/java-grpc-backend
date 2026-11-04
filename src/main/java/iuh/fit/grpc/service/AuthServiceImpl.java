@@ -21,6 +21,16 @@ import iuh.fit.grpc.chat.RequestOtpRequest;
 import iuh.fit.grpc.chat.RequestOtpResponse;
 import iuh.fit.grpc.chat.ResetPasswordRequest;
 import iuh.fit.grpc.chat.ResetPasswordResponse;
+import iuh.fit.grpc.chat.UpdateProfileRequest;
+import iuh.fit.grpc.chat.UpdateProfileResponse;
+import iuh.fit.grpc.chat.ChangePasswordLoggedInRequest;
+import iuh.fit.grpc.chat.ChangePasswordLoggedInResponse;
+import com.mongodb.client.model.FindOneAndUpdateOptions;
+import com.mongodb.client.model.ReturnDocument;
+import java.util.ArrayList;
+import java.util.List;
+import org.bson.conversions.Bson;
+
 import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.slf4j.Logger;
@@ -241,5 +251,100 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
 
         out.onNext(ResetPasswordResponse.getDefaultInstance());
         out.onCompleted();
+    }
+
+    @Override
+    public void updateProfile(UpdateProfileRequest request, StreamObserver<UpdateProfileResponse> out) {
+        String userId = request.getUserId();
+        if (userId.isBlank()) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu user_id").asRuntimeException());
+            return;
+        }
+
+        List<Bson> updates = new ArrayList<>();
+        if (!request.getDisplayName().isBlank()) {
+            updates.add(Updates.set("display_name", request.getDisplayName().trim()));
+        }
+        if (!request.getAvatarUrl().isBlank()) {
+            updates.add(Updates.set("avatar_url", request.getAvatarUrl().trim()));
+        }
+
+        if (updates.isEmpty()) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Không có thông tin cần cập nhật").asRuntimeException());
+            return;
+        }
+
+        try {
+            Document user = users.findOneAndUpdate(
+                    Filters.eq("_id", userId),
+                    Updates.combine(updates),
+                    new FindOneAndUpdateOptions().returnDocument(ReturnDocument.AFTER)
+            );
+            if (user == null) {
+                out.onError(Status.NOT_FOUND.withDescription("Không tìm thấy người dùng").asRuntimeException());
+                return;
+            }
+
+            out.onNext(UpdateProfileResponse.newBuilder()
+                    .setIsSuccess(true)
+                    .setStatusMessage("Cập nhật thành công")
+                    .setDisplayName(user.getString("display_name") != null ? user.getString("display_name") : "")
+                    .setAvatarUrl(user.getString("avatar_url") != null ? user.getString("avatar_url") : "")
+                    .build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Cập nhật profile thất bại", e);
+            out.onError(Status.INTERNAL.withDescription("Không cập nhật được hồ sơ").asRuntimeException());
+        }
+    }
+
+    @Override
+    public void changePasswordLoggedIn(ChangePasswordLoggedInRequest request, StreamObserver<ChangePasswordLoggedInResponse> out) {
+        String userId = request.getUserId();
+        String currentPassword = request.getCurrentPassword();
+        String newPassword = request.getNewPassword();
+
+        if (userId.isBlank() || currentPassword.isBlank() || newPassword.isBlank()) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu thông tin mật khẩu").asRuntimeException());
+            return;
+        }
+
+        if (newPassword.length() < 6) {
+            out.onError(Status.INVALID_ARGUMENT.withDescription("Mật khẩu mới phải từ 6 ký tự trở lên").asRuntimeException());
+            return;
+        }
+
+        try {
+            Document user = users.find(Filters.eq("_id", userId)).first();
+            if (user == null) {
+                out.onError(Status.NOT_FOUND.withDescription("Không tìm thấy người dùng").asRuntimeException());
+                return;
+            }
+
+            String hash = user.getString("password_hash");
+            boolean valid = hash != null && BCrypt.verifyer().verify(currentPassword.toCharArray(), hash.toCharArray()).verified;
+            if (!valid) {
+                out.onError(Status.UNAUTHENTICATED.withDescription("Mật khẩu hiện tại không đúng").asRuntimeException());
+                return;
+            }
+
+            String newHash = BCrypt.withDefaults().hashToString(BCRYPT_COST, newPassword.toCharArray());
+            users.updateOne(
+                    Filters.eq("_id", userId),
+                    Updates.combine(
+                            Updates.set("password_hash", newHash),
+                            Updates.set("password_changed_at", System.currentTimeMillis())
+                    )
+            );
+
+            out.onNext(ChangePasswordLoggedInResponse.newBuilder()
+                    .setIsSuccess(true)
+                    .setStatusMessage("Đổi mật khẩu thành công")
+                    .build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Đổi mật khẩu thất bại", e);
+            out.onError(Status.INTERNAL.withDescription("Không đổi được mật khẩu").asRuntimeException());
+        }
     }
 }
