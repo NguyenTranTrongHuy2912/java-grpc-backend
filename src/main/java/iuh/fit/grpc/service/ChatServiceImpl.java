@@ -115,12 +115,12 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     @Override
     public void sendMessage(ChatMessage request, StreamObserver<ChatResponse> out) {
         MessageType type = request.getType();
-        if (type != MessageType.MESSAGE_TYPE_TEXT && type != MessageType.MESSAGE_TYPE_IMAGE) {
+        if (type != MessageType.MESSAGE_TYPE_TEXT && type != MessageType.MESSAGE_TYPE_IMAGE && type != MessageType.MESSAGE_TYPE_VIDEO) {
             out.onError(Status.INVALID_ARGUMENT
                     .withDescription("Loại tin nhắn chưa được hỗ trợ").asRuntimeException());
             return;
         }
-        boolean isImage = type == MessageType.MESSAGE_TYPE_IMAGE;
+        boolean isMedia = type == MessageType.MESSAGE_TYPE_IMAGE || type == MessageType.MESSAGE_TYPE_VIDEO;
 
         if (request.getMessageId().isBlank() || request.getRoomId().isBlank()
                 || request.getSenderId().isBlank()) {
@@ -129,7 +129,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .asRuntimeException());
             return;
         }
-        if (isImage) {
+        if (isMedia) {
             String url = request.getMediaUrl();
             if (url.isBlank() || url.length() > MAX_MEDIA_URL || !url.startsWith("https://")) {
                 out.onError(Status.INVALID_ARGUMENT
@@ -157,17 +157,22 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         long savedTimestamp = request.getTimestamp();
         boolean inserted = false;
         try {
+            String typeStr = type == MessageType.MESSAGE_TYPE_IMAGE ? "IMAGE"
+                    : type == MessageType.MESSAGE_TYPE_VIDEO ? "VIDEO" : "TEXT";
             Document message = new Document()
                     .append("_id", request.getMessageId())
                     .append("room_id", request.getRoomId())
                     .append("sender_id", request.getSenderId())
                     .append("content", request.getContent())
                     .append("timestamp", request.getTimestamp())
-                    .append("type", isImage ? "IMAGE" : "TEXT");
-            if (isImage) {
+                    .append("type", typeStr);
+            if (isMedia) {
                 message.append("media_url", request.getMediaUrl())
                         .append("media_width", request.getMediaWidth())
                         .append("media_height", request.getMediaHeight());
+                if (request.getMediaDurationMs() > 0) {
+                    message.append("media_duration_ms", request.getMediaDurationMs());
+                }
             }
             messageCollection.insertOne(message);
             inserted = true;
@@ -225,7 +230,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                                     .append("message_id", m.getMessageId())
                                     .append("sender_id", m.getSenderId())
                                     .append("content", m.getType() == MessageType.MESSAGE_TYPE_IMAGE
-                                            ? IMAGE_PREVIEW : m.getContent())
+                                            ? IMAGE_PREVIEW
+                                            : m.getType() == MessageType.MESSAGE_TYPE_VIDEO
+                                                    ? "[Video]" : m.getContent())
                                     .append("timestamp", m.getTimestamp())),
                             Updates.max("updated_at", m.getTimestamp())));
         } catch (Exception e) {
@@ -277,6 +284,12 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                             .setMediaUrl(Objects.toString(d.getString("media_url"), ""))
                             .setMediaWidth(d.getInteger("media_width", 0))
                             .setMediaHeight(d.getInteger("media_height", 0));
+                } else if ("VIDEO".equals(d.getString("type"))) {
+                    mb.setType(MessageType.MESSAGE_TYPE_VIDEO)
+                            .setMediaUrl(Objects.toString(d.getString("media_url"), ""))
+                            .setMediaWidth(d.getInteger("media_width", 0))
+                            .setMediaHeight(d.getInteger("media_height", 0))
+                            .setMediaDurationMs(d.getLong("media_duration_ms") != null ? d.getLong("media_duration_ms") : 0);
                 }
                 builder.addMessages(mb);
             }
