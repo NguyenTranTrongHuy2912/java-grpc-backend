@@ -22,6 +22,7 @@ import iuh.fit.grpc.chat.ListRoomsRequest;
 import iuh.fit.grpc.chat.ListRoomsResponse;
 import iuh.fit.grpc.chat.MarkRoomReadRequest;
 import iuh.fit.grpc.chat.MarkRoomReadResponse;
+import iuh.fit.grpc.chat.MessageType;
 import iuh.fit.grpc.chat.Room;
 import iuh.fit.grpc.chat.RoomMember;
 import iuh.fit.grpc.chat.RoomType;
@@ -41,6 +42,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -58,6 +60,8 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private static final int DEFAULT_SEARCH_LIMIT = 10;
     private static final int MAX_SEARCH_LIMIT = 20;
     private static final int MAX_ROOMS_PER_LIST = 200;
+    private static final int MAX_MEDIA_URL = 500;
+    private static final String IMAGE_PREVIEW = "Đã gửi một ảnh";
 
     private final MongoDatabase database = MongoConfig.getDatabase();
     private final MongoCollection<Document> messageCollection = database.getCollection("messages");
@@ -81,11 +85,31 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
     @Override
     public void sendMessage(ChatMessage request, StreamObserver<ChatResponse> out) {
-        if (request.getMessageId().isBlank() || request.getRoomId().isBlank()
-                || request.getSenderId().isBlank() || request.getContent().isBlank()) {
+        MessageType type = request.getType();
+        if (type != MessageType.MESSAGE_TYPE_TEXT && type != MessageType.MESSAGE_TYPE_IMAGE) {
             out.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Thiếu message_id, room_id, sender_id hoặc content")
+                    .withDescription("Loại tin nhắn chưa được hỗ trợ").asRuntimeException());
+            return;
+        }
+        boolean isImage = type == MessageType.MESSAGE_TYPE_IMAGE;
+
+        if (request.getMessageId().isBlank() || request.getRoomId().isBlank()
+                || request.getSenderId().isBlank()) {
+            out.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Thiếu message_id, room_id hoặc sender_id")
                     .asRuntimeException());
+            return;
+        }
+        if (isImage) {
+            String url = request.getMediaUrl();
+            if (url.isBlank() || url.length() > MAX_MEDIA_URL || !url.startsWith("https://")) {
+                out.onError(Status.INVALID_ARGUMENT
+                        .withDescription("media_url không hợp lệ").asRuntimeException());
+                return;
+            }
+        } else if (request.getContent().isBlank()) {
+            out.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Thiếu content").asRuntimeException());
             return;
         }
 
@@ -104,12 +128,19 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         long savedTimestamp = request.getTimestamp();
         boolean inserted = false;
         try {
-            messageCollection.insertOne(new Document()
+            Document message = new Document()
                     .append("_id", request.getMessageId())
                     .append("room_id", request.getRoomId())
                     .append("sender_id", request.getSenderId())
                     .append("content", request.getContent())
-                    .append("timestamp", request.getTimestamp()));
+                    .append("timestamp", request.getTimestamp())
+                    .append("type", isImage ? "IMAGE" : "TEXT");
+            if (isImage) {
+                message.append("media_url", request.getMediaUrl())
+                        .append("media_width", request.getMediaWidth())
+                        .append("media_height", request.getMediaHeight());
+            }
+            messageCollection.insertOne(message);
             inserted = true;
         } catch (MongoWriteException e) {
             if (e.getError().getCategory() != ErrorCategory.DUPLICATE_KEY) {
@@ -158,7 +189,8 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                             Updates.set("last_message", new Document()
                                     .append("message_id", m.getMessageId())
                                     .append("sender_id", m.getSenderId())
-                                    .append("content", m.getContent())
+                                    .append("content", m.getType() == MessageType.MESSAGE_TYPE_IMAGE
+                                            ? IMAGE_PREVIEW : m.getContent())
                                     .append("timestamp", m.getTimestamp())),
                             Updates.max("updated_at", m.getTimestamp())));
         } catch (Exception e) {
@@ -198,12 +230,20 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
             HistoryResponse.Builder builder = HistoryResponse.newBuilder().setHasMore(hasMore);
             for (Document d : docs) {
-                builder.addMessages(ChatMessage.newBuilder()
+                ChatMessage.Builder mb = ChatMessage.newBuilder()
                         .setMessageId(d.getString("_id"))
                         .setRoomId(d.getString("room_id"))
                         .setSenderId(d.getString("sender_id"))
-                        .setContent(d.getString("content"))
-                        .setTimestamp(d.getLong("timestamp")));
+                        .setContent(Objects.toString(d.getString("content"), ""))
+                        .setTimestamp(d.getLong("timestamp"));
+                // Tin cũ không có trường "type" nên mặc định là text
+                if ("IMAGE".equals(d.getString("type"))) {
+                    mb.setType(MessageType.MESSAGE_TYPE_IMAGE)
+                            .setMediaUrl(Objects.toString(d.getString("media_url"), ""))
+                            .setMediaWidth(d.getInteger("media_width", 0))
+                            .setMediaHeight(d.getInteger("media_height", 0));
+                }
+                builder.addMessages(mb);
             }
 
             responseObserver.onNext(builder.build());
