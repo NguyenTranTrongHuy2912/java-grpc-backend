@@ -17,6 +17,11 @@ import iuh.fit.grpc.chat.ChatResponse;
 import iuh.fit.grpc.chat.ChatServiceGrpc;
 import iuh.fit.grpc.chat.CreateRoomRequest;
 import iuh.fit.grpc.chat.HistoryRequest;
+import io.grpc.stub.ServerCallStreamObserver;
+import iuh.fit.grpc.chat.ChatEvent;
+import iuh.fit.grpc.chat.EventType;
+import iuh.fit.grpc.chat.StreamEventsRequest;
+import java.util.concurrent.ConcurrentHashMap;
 import iuh.fit.grpc.chat.HistoryResponse;
 import iuh.fit.grpc.chat.ListRoomsRequest;
 import iuh.fit.grpc.chat.ListRoomsResponse;
@@ -67,6 +72,8 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private final MongoCollection<Document> messageCollection = database.getCollection("messages");
     private final MongoCollection<Document> roomCollection = database.getCollection("rooms");
     private final MongoCollection<Document> userCollection = database.getCollection("users");
+    // Quản lý active subscribers theo user_id cho Realtime Streaming
+    private final Map<String, Set<StreamObserver<ChatEvent>>> userSubscribers = new ConcurrentHashMap<>();
 
     public ChatServiceImpl() {
         messageCollection.createIndex(Indexes.compoundIndex(
@@ -165,6 +172,12 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
         if (inserted) {
             updateLastMessage(request);
+            ChatEvent event = ChatEvent.newBuilder()
+                    .setEventType(EventType.EVENT_NEW_MESSAGE)
+                    .setMessage(request)
+                    .setTimestamp(savedTimestamp)
+                    .build();
+            broadcastToRoom(request.getRoomId(), event);
         }
 
         out.onNext(ChatResponse.newBuilder()
@@ -552,5 +565,59 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
     private static void fail(StreamObserver<?> out, Status status) {
         out.onError(status.asRuntimeException());
+    }
+
+    // ------------------------------------------------------------------ Realtime Streaming
+
+    @Override
+    public void subscribeEvents(StreamEventsRequest request, StreamObserver<ChatEvent> responseObserver) {
+        String userId = request.getUserId();
+        if (userId == null || userId.isBlank()) {
+            responseObserver.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Thiếu user_id để subscribe").asRuntimeException());
+            return;
+        }
+
+        userSubscribers.computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet()).add(responseObserver);
+        log.info("User {} đã kết nối realtime event stream", userId);
+
+        if (responseObserver instanceof ServerCallStreamObserver) {
+            ServerCallStreamObserver<ChatEvent> serverObserver = (ServerCallStreamObserver<ChatEvent>) responseObserver;
+            serverObserver.setOnCancelHandler(() -> {
+                Set<StreamObserver<ChatEvent>> set = userSubscribers.get(userId);
+                if (set != null) {
+                    set.remove(responseObserver);
+                    if (set.isEmpty()) {
+                        userSubscribers.remove(userId);
+                    }
+                }
+                log.info("User {} đã hủy realtime event stream", userId);
+            });
+        }
+    }
+
+    private void broadcastToRoom(String roomId, ChatEvent event) {
+        try {
+            Document room = roomCollection.find(Filters.eq("_id", roomId)).first();
+            if (room == null) return;
+            List<String> memberIds = room.getList("member_ids", String.class);
+            if (memberIds == null || memberIds.isEmpty()) return;
+
+            for (String memberId : memberIds) {
+                Set<StreamObserver<ChatEvent>> subscribers = userSubscribers.get(memberId);
+                if (subscribers != null && !subscribers.isEmpty()) {
+                    for (StreamObserver<ChatEvent> obs : subscribers) {
+                        try {
+                            obs.onNext(event);
+                        } catch (Exception ex) {
+                            log.warn("Lỗi khi gửi realtime event cho user {}", memberId, ex);
+                            subscribers.remove(obs);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("Lỗi khi phát tán realtime event cho phòng {}", roomId, e);
+        }
     }
 }
