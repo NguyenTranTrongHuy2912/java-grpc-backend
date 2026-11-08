@@ -54,6 +54,23 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
     public AuthServiceImpl(OtpService otpService) {
         this.otpService = otpService;
         users.createIndex(Indexes.ascending("account"), new IndexOptions().unique(true));
+        try {
+            // Tự động khởi tạo Role (ADMIN / USER) và trạng thái is_active trên MongoDB
+            users.updateMany(
+                Filters.in("account", "quoc05@gmail.com", "admin@chatapp.com", "admin@gmail.com", "admin@iuh.edu.vn"),
+                Updates.set("role", "ADMIN")
+            );
+            users.updateMany(
+                Filters.exists("role", false),
+                Updates.set("role", "USER")
+            );
+            users.updateMany(
+                Filters.exists("is_active", false),
+                Updates.set("is_active", true)
+            );
+        } catch (Exception e) {
+            log.warn("Cập nhật chỉ mục và Role trong MongoDB: {}", e.getMessage());
+        }
     }
 
     static String normalizeEmail(String raw) {
@@ -142,11 +159,18 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         String userId = UUID.randomUUID().toString();
         try {
             String hash = BCrypt.withDefaults().hashToString(BCRYPT_COST, password.toCharArray());
+            String role = (account.equalsIgnoreCase("quoc05@gmail.com")
+                    || account.equalsIgnoreCase("admin@chatapp.com")
+                    || account.equalsIgnoreCase("admin@gmail.com")
+                    || account.equalsIgnoreCase("admin@iuh.edu.vn")) ? "ADMIN" : "USER";
+
             users.insertOne(new Document()
                     .append("_id", userId)
                     .append("account", account)
                     .append("display_name", displayName)
                     .append("password_hash", hash)
+                    .append("role", role)
+                    .append("is_active", true)
                     .append("created_at", System.currentTimeMillis()));
         } catch (MongoWriteException e) {
             if (e.getError().getCategory() == ErrorCategory.DUPLICATE_KEY) {
@@ -186,6 +210,12 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
             if (user == null || !ok) {
                 out.onError(Status.UNAUTHENTICATED
                         .withDescription("Sai tài khoản hoặc mật khẩu").asRuntimeException());
+                return;
+            }
+
+            if (user.containsKey("is_active") && !user.getBoolean("is_active", true)) {
+                out.onError(Status.PERMISSION_DENIED
+                        .withDescription("Tài khoản đã bị tạm khóa bởi Quản trị viên").asRuntimeException());
                 return;
             }
 
