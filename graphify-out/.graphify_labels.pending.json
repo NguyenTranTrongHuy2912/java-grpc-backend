@@ -5,6 +5,6 @@
   "3": "OtpService.java",
   "4": "ChatServiceImpl",
   "5": "MongoConfig.java",
-  "6": "Override",
+  "6": "Java gRPC Core Backend Service",
   "7": "iuh.fit:java-grpc-backend"
 }
