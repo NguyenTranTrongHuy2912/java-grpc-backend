@@ -32,7 +32,6 @@ import iuh.fit.grpc.chat.ListFriendsReq;
 import iuh.fit.grpc.chat.ListFriendsResp;
 import iuh.fit.grpc.chat.ListFriendRequestsReq;
 import iuh.fit.grpc.chat.ListFriendRequestsResp;
-import com.mongodb.client.model.Sorts;
 import iuh.fit.grpc.chat.HistoryResponse;
 import iuh.fit.grpc.chat.ListRoomsRequest;
 import iuh.fit.grpc.chat.ListRoomsResponse;
@@ -104,8 +103,8 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 Indexes.ascending("receiver_id"),
                 Indexes.ascending("status")));
         friendshipCollection.createIndex(Indexes.compoundIndex(
-                Indexes.ascending("user_id"),
-                Indexes.ascending("friend_id")),
+                        Indexes.ascending("user_id"),
+                        Indexes.ascending("friend_id")),
                 new IndexOptions().unique(true));
 
     }
@@ -232,7 +231,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                                     .append("content", m.getType() == MessageType.MESSAGE_TYPE_IMAGE
                                             ? IMAGE_PREVIEW
                                             : m.getType() == MessageType.MESSAGE_TYPE_VIDEO
-                                                    ? "[Video]" : m.getContent())
+                                            ? "[Video]" : m.getContent())
                                     .append("timestamp", m.getTimestamp())),
                             Updates.max("updated_at", m.getTimestamp())));
         } catch (Exception e) {
@@ -607,27 +606,69 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     @Override
     public void subscribeEvents(StreamEventsRequest request, StreamObserver<ChatEvent> responseObserver) {
         String userId = request.getUserId();
-        if (userId == null || userId.isBlank()) {
+        if (userId.isBlank()) {
             responseObserver.onError(Status.INVALID_ARGUMENT
                     .withDescription("Thiếu user_id để subscribe").asRuntimeException());
             return;
         }
 
-        userSubscribers.computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet()).add(responseObserver);
+        addSubscriber(userId, responseObserver);
         log.info("User {} đã kết nối realtime event stream", userId);
 
-        if (responseObserver instanceof ServerCallStreamObserver) {
-            ServerCallStreamObserver<ChatEvent> serverObserver = (ServerCallStreamObserver<ChatEvent>) responseObserver;
+        if (responseObserver instanceof ServerCallStreamObserver<ChatEvent> serverObserver) {
             serverObserver.setOnCancelHandler(() -> {
-                Set<StreamObserver<ChatEvent>> set = userSubscribers.get(userId);
-                if (set != null) {
-                    set.remove(responseObserver);
-                    if (set.isEmpty()) {
-                        userSubscribers.remove(userId);
-                    }
-                }
+                removeSubscriber(userId, responseObserver);
                 log.info("User {} đã hủy realtime event stream", userId);
             });
+        }
+    }
+
+    /**
+     * Thêm stream của user. Dùng compute để thao tác atomic với removeSubscriber: trước đây
+     * "get set -> kiểm tra rỗng -> remove(userId)" của luồng hủy có thể xóa mất set vừa được
+     * luồng kết nối lại thêm stream mới vào, khiến user nối lại rồi nhưng không nhận được event nào.
+     */
+    private void addSubscriber(String userId, StreamObserver<ChatEvent> obs) {
+        userSubscribers.compute(userId, (k, set) -> {
+            if (set == null) set = ConcurrentHashMap.newKeySet();
+            set.add(obs);
+            return set;
+        });
+    }
+
+    private void removeSubscriber(String userId, StreamObserver<ChatEvent> obs) {
+        userSubscribers.computeIfPresent(userId, (k, set) -> {
+            set.remove(obs);
+            return set.isEmpty() ? null : set;
+        });
+    }
+
+    /** Gửi event tới mọi stream đang mở của một user. */
+    private void pushToUser(String userId, ChatEvent event) {
+        Set<StreamObserver<ChatEvent>> subscribers = userSubscribers.get(userId);
+        if (subscribers == null || subscribers.isEmpty()) return;
+
+        for (StreamObserver<ChatEvent> obs : subscribers) {
+            if (obs instanceof ServerCallStreamObserver
+                    && ((ServerCallStreamObserver<ChatEvent>) obs).isCancelled()) {
+                removeSubscriber(userId, obs);
+                continue;
+            }
+            try {
+                // StreamObserver của gRPC không an toàn đa luồng: các tin gửi cùng lúc phải xếp hàng theo từng stream
+                synchronized (obs) {
+                    obs.onNext(event);
+                }
+            } catch (Exception ex) {
+                log.warn("Gửi realtime event cho user {} lỗi, đóng stream để app kết nối lại", userId, ex);
+                removeSubscriber(userId, obs);
+                try {
+                    // Báo cho gateway biết stream đã hỏng, nếu không nó vẫn giữ WebSocket mở nhưng không nhận được gì
+                    obs.onError(Status.UNAVAILABLE.withDescription("Stream realtime lỗi").asRuntimeException());
+                } catch (Exception ignored) {
+                    // stream đã đóng sẵn
+                }
+            }
         }
     }
 
@@ -639,17 +680,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             if (memberIds == null || memberIds.isEmpty()) return;
 
             for (String memberId : memberIds) {
-                Set<StreamObserver<ChatEvent>> subscribers = userSubscribers.get(memberId);
-                if (subscribers != null && !subscribers.isEmpty()) {
-                    for (StreamObserver<ChatEvent> obs : subscribers) {
-                        try {
-                            obs.onNext(event);
-                        } catch (Exception ex) {
-                            log.warn("Lỗi khi gửi realtime event cho user {}", memberId, ex);
-                            subscribers.remove(obs);
-                        }
-                    }
-                }
+                pushToUser(memberId, event);
             }
         } catch (Exception e) {
             log.error("Lỗi khi phát tán realtime event cho phòng {}", roomId, e);
@@ -726,21 +757,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .build();
 
             // Realtime push cho receiver
-            Set<StreamObserver<ChatEvent>> subscribers = userSubscribers.get(receiverId);
-            if (subscribers != null && !subscribers.isEmpty()) {
-                ChatEvent event = ChatEvent.newBuilder()
-                        .setEventType(EventType.EVENT_FRIEND_REQUEST)
-                        .setFriendRequest(item)
-                        .setTimestamp(now)
-                        .build();
-                for (StreamObserver<ChatEvent> obs : subscribers) {
-                    try {
-                        obs.onNext(event);
-                    } catch (Exception ex) {
-                        subscribers.remove(obs);
-                    }
-                }
-            }
+            pushToUser(receiverId, ChatEvent.newBuilder()
+                    .setEventType(EventType.EVENT_FRIEND_REQUEST)
+                    .setFriendRequest(item)
+                    .setTimestamp(now)
+                    .build());
 
             out.onNext(SendFriendRequestResp.newBuilder()
                     .setIsSuccess(true)
@@ -799,21 +820,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                         .append("created_at", now));
 
                 // Realtime notify sender that their request was accepted
-                Set<StreamObserver<ChatEvent>> subscribers = userSubscribers.get(senderId);
-                if (subscribers != null && !subscribers.isEmpty()) {
-                    ChatEvent event = ChatEvent.newBuilder()
-                            .setEventType(EventType.EVENT_FRIEND_ACCEPTED)
-                            .setUserId(userId)
-                            .setTimestamp(now)
-                            .build();
-                    for (StreamObserver<ChatEvent> obs : subscribers) {
-                        try {
-                            obs.onNext(event);
-                        } catch (Exception ex) {
-                            subscribers.remove(obs);
-                        }
-                    }
-                }
+                pushToUser(senderId, ChatEvent.newBuilder()
+                        .setEventType(EventType.EVENT_FRIEND_ACCEPTED)
+                        .setUserId(userId)
+                        .setTimestamp(now)
+                        .build());
             } else {
                 friendRequestCollection.updateOne(
                         Filters.eq("_id", reqId),
