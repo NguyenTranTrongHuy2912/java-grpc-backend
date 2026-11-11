@@ -40,3 +40,7 @@ build/
 
 ### Windows ###
 .env
+
+#### Graphify ###
+graphify-out/*
+!graphify-out/graph.json
