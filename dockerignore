@@ -1,0 +1,8 @@
+target
+.git
+.idea
+*.iml
+graphify-out
+.env
+.env.*
+!.env.example
