@@ -89,24 +89,32 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private final Map<String, Set<StreamObserver<ChatEvent>>> userSubscribers = new ConcurrentHashMap<>();
 
     public ChatServiceImpl() {
-        messageCollection.createIndex(Indexes.compoundIndex(
-                Indexes.ascending("room_id"),
-                Indexes.descending("timestamp")));
-        // Liệt kê phòng của một người, sắp theo hoạt động gần nhất
-        roomCollection.createIndex(Indexes.compoundIndex(
-                Indexes.ascending("member_ids"),
-                Indexes.descending("updated_at")));
-        // Mỗi cặp người dùng chỉ có tối đa một phòng 1-1 (phòng nhóm không có direct_key nên bị bỏ qua)
-        roomCollection.createIndex(Indexes.ascending("direct_key"),
-                new IndexOptions().unique(true).sparse(true));
-        friendRequestCollection.createIndex(Indexes.compoundIndex(
-                Indexes.ascending("receiver_id"),
-                Indexes.ascending("status")));
-        friendshipCollection.createIndex(Indexes.compoundIndex(
-                        Indexes.ascending("user_id"),
-                        Indexes.ascending("friend_id")),
-                new IndexOptions().unique(true));
+        Thread t = new Thread(this::ensureIndexes, "mongo-index-init");
+        t.setDaemon(true);
+        t.start();
+    }
 
+    private void ensureIndexes() {
+        try {
+            messageCollection.createIndex(Indexes.compoundIndex(
+                    Indexes.ascending("room_id"),
+                    Indexes.descending("timestamp")));
+            roomCollection.createIndex(Indexes.compoundIndex(
+                    Indexes.ascending("member_ids"),
+                    Indexes.descending("updated_at")));
+            roomCollection.createIndex(Indexes.ascending("direct_key"),
+                    new IndexOptions().unique(true).sparse(true));
+            friendRequestCollection.createIndex(Indexes.compoundIndex(
+                    Indexes.ascending("receiver_id"),
+                    Indexes.ascending("status")));
+            friendshipCollection.createIndex(Indexes.compoundIndex(
+                            Indexes.ascending("user_id"),
+                            Indexes.ascending("friend_id")),
+                    new IndexOptions().unique(true));
+            log.info("Đã tạo xong index MongoDB");
+        } catch (Exception e) {
+            log.error("Không tạo được index (sẽ không retry): {}", e.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------ Tin nhắn
