@@ -57,8 +57,12 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         try {
             // Tự động khởi tạo Role (ADMIN / USER) và trạng thái is_active trên MongoDB
             users.updateMany(
-                Filters.in("account", "quoc05@gmail.com", "admin@chatapp.com", "admin@gmail.com", "admin@iuh.edu.vn", "nguyenvanquoc20055@gmail.com", "nguyenvanquoclt1@gmail.com"),
+                Filters.in("account", "quoc05@gmail.com", "admin@chatapp.com", "admin@gmail.com", "admin@iuh.edu.vn", "nguyenvanquoc20055@gmail.com"),
                 Updates.set("role", "ADMIN")
+            );
+            users.updateOne(
+                Filters.eq("account", "nguyenvanquoclt1@gmail.com"),
+                Updates.set("role", "USER")
             );
             users.updateMany(
                 Filters.exists("role", false),
