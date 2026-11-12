@@ -537,6 +537,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
     /** null nếu hợp lệ; ngược lại trả về Status lỗi tương ứng. */
     private Status checkMembership(String roomId, String userId) {
+        if ("hq_ai_bot".equals(userId) || "SYSTEM".equals(userId)) {
+            return null;
+        }
         Document room = roomCollection.find(Filters.eq("_id", roomId))
                 .projection(Projections.include("member_ids"))
                 .first();
