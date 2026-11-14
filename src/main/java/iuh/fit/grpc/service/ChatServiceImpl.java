@@ -536,6 +536,14 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 // max => không bao giờ lùi mốc đã đọc
                 roomCollection.updateOne(Filters.eq("_id", roomId),
                         Updates.max("last_read." + userId, readUpTo));
+
+                ChatEvent event = ChatEvent.newBuilder()
+                        .setEventType(EventType.EVENT_READ_RECEIPT)
+                        .setUserId(userId)
+                        .setTimestamp(readUpTo)
+                        .setRoom(Room.newBuilder().setRoomId(roomId).build())
+                        .build();
+                broadcastToRoom(roomId, event);
             }
             out.onNext(MarkRoomReadResponse.getDefaultInstance());
             out.onCompleted();

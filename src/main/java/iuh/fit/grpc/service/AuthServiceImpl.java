@@ -47,6 +47,19 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
     private static final String DUMMY_HASH =
             BCrypt.withDefaults().hashToString(BCRYPT_COST, "dummy-password".toCharArray());
 
+    private static final java.util.Set<String> DEFAULT_ADMIN_EMAILS = new java.util.HashSet<>();
+    static {
+        String envAdmins = System.getenv("ADMIN_EMAILS");
+        if (envAdmins != null && !envAdmins.isBlank()) {
+            for (String email : envAdmins.split(",")) {
+                String clean = email.trim().toLowerCase(Locale.ROOT);
+                if (!clean.isEmpty()) {
+                    DEFAULT_ADMIN_EMAILS.add(clean);
+                }
+            }
+        }
+    }
+
     private final MongoCollection<Document> users =
             MongoConfig.getDatabase().getCollection("users");
     private final OtpService otpService;
@@ -55,15 +68,13 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         this.otpService = otpService;
         users.createIndex(Indexes.ascending("account"), new IndexOptions().unique(true));
         try {
-            // Tự động khởi tạo Role (ADMIN / USER) và trạng thái is_active trên MongoDB
-            users.updateMany(
-                Filters.in("account", "quoc05@gmail.com", "admin@chatapp.com", "admin@gmail.com", "admin@iuh.edu.vn", "nguyenvanquoc20055@gmail.com"),
-                Updates.set("role", "ADMIN")
-            );
-            users.updateOne(
-                Filters.eq("account", "nguyenvanquoclt1@gmail.com"),
-                Updates.set("role", "USER")
-            );
+            // Tự động khởi tạo Role (ADMIN / USER) và trạng thái is_active trên MongoDB từ ADMIN_EMAILS
+            if (!DEFAULT_ADMIN_EMAILS.isEmpty()) {
+                users.updateMany(
+                    Filters.in("account", DEFAULT_ADMIN_EMAILS),
+                    Updates.set("role", "ADMIN")
+                );
+            }
             users.updateMany(
                 Filters.exists("role", false),
                 Updates.set("role", "USER")
@@ -163,10 +174,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         String userId = UUID.randomUUID().toString();
         try {
             String hash = BCrypt.withDefaults().hashToString(BCRYPT_COST, password.toCharArray());
-            String role = (account.equalsIgnoreCase("quoc05@gmail.com")
-                    || account.equalsIgnoreCase("admin@chatapp.com")
-                    || account.equalsIgnoreCase("admin@gmail.com")
-                    || account.equalsIgnoreCase("admin@iuh.edu.vn") || account.equalsIgnoreCase("nguyenvanquoc20055@gmail.com") || account.equalsIgnoreCase("nguyenvanquoclt1@gmail.com")) ? "ADMIN" : "USER";
+            String role = (!DEFAULT_ADMIN_EMAILS.isEmpty() && DEFAULT_ADMIN_EMAILS.contains(account)) ? "ADMIN" : "USER";
 
             users.insertOne(new Document()
                     .append("_id", userId)
