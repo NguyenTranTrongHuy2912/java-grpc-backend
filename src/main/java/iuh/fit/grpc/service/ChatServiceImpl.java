@@ -5,6 +5,14 @@ import com.mongodb.MongoWriteException;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.FindOneAndUpdateOptions;
+import com.mongodb.client.model.ReturnDocument;
+import iuh.fit.grpc.chat.AddRoomMembersRequest;
+import iuh.fit.grpc.chat.AddRoomMembersResponse;
+import iuh.fit.grpc.chat.LeaveRoomRequest;
+import iuh.fit.grpc.chat.LeaveRoomResponse;
+import iuh.fit.grpc.chat.UpdateRoomNameRequest;
+import iuh.fit.grpc.chat.UpdateRoomNameResponse;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import com.mongodb.client.model.Projections;
@@ -62,6 +70,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private static final Logger log = LoggerFactory.getLogger(ChatServiceImpl.class);
@@ -76,6 +85,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private static final int MAX_SEARCH_LIMIT = 20;
     private static final int MAX_ROOMS_PER_LIST = 200;
     private static final int MAX_MEDIA_URL = 500;
+    /** Người gửi của tin nhắn hệ thống (rời nhóm, thêm thành viên, đổi tên...). Khớp với gateway và client hiện tại. */
+    private static final String SYSTEM_SENDER = "system";
+    private static final String AI_BOT_ID = "hq_ai_bot";
     private static final String IMAGE_PREVIEW = "Đã gửi một ảnh";
 
     private final MongoDatabase database = MongoConfig.getDatabase();
@@ -531,6 +543,236 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             log.error("Đánh dấu đã đọc phòng {} thất bại", roomId, e);
             fail(out, Status.INTERNAL.withDescription("Không đánh dấu được đã đọc"));
         }
+    }
+
+    // ------------------------------------------------------------------ Quản lý nhóm
+
+    /**
+     * Rời nhóm. Gọi lại khi đã rời thì vẫn thành công (idempotent).
+     * Nếu người rời là trưởng nhóm, quyền chuyển cho thành viên (không phải bot) đứng đầu danh sách còn lại.
+     */
+    @Override
+    public void leaveRoom(LeaveRoomRequest request, StreamObserver<LeaveRoomResponse> out) {
+        String userId = request.getUserId().trim();
+        String roomId = request.getRoomId().trim();
+        if (userId.isEmpty() || roomId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu user_id hoặc room_id"));
+            return;
+        }
+        try {
+            Document room = roomCollection.find(Filters.eq("_id", roomId)).first();
+            if (room == null) {
+                fail(out, Status.NOT_FOUND.withDescription("Không tìm thấy phòng chat."));
+                return;
+            }
+            if (!"GROUP".equals(room.getString("type"))) {
+                fail(out, Status.INVALID_ARGUMENT.withDescription("Chỉ có thể rời phòng chat nhóm"));
+                return;
+            }
+
+            // Gỡ khỏi danh sách chỉ khi còn là thành viên: hai yêu cầu rời cùng lúc chỉ một yêu cầu thắng
+            Document after = roomCollection.findOneAndUpdate(
+                    Filters.and(Filters.eq("_id", roomId), Filters.eq("member_ids", userId)),
+                    Updates.combine(
+                            Updates.pull("member_ids", userId),
+                            Updates.unset("last_read." + userId)),
+                    new FindOneAndUpdateOptions().returnDocument(ReturnDocument.AFTER));
+            if (after == null) {
+                out.onNext(LeaveRoomResponse.newBuilder()
+                        .setIsSuccess(true)
+                        .setStatusMessage("Bạn không còn trong phòng chat này.")
+                        .build());
+                out.onCompleted();
+                return;
+            }
+
+            List<String> remaining = after.getList("member_ids", String.class);
+            if (remaining == null) remaining = List.of();
+            if (userId.equals(after.getString("created_by"))) {
+                remaining.stream()
+                        .filter(m -> !AI_BOT_ID.equals(m))
+                        .findFirst()
+                        .ifPresent(newOwner -> roomCollection.updateOne(
+                                Filters.eq("_id", roomId), Updates.set("created_by", newOwner)));
+            }
+
+            String name = loadDisplayNames(List.of(userId)).getOrDefault(userId, "Một thành viên");
+            postSystemMessage(roomId, name + " đã rời khỏi nhóm.");
+            // Người vừa rời không còn trong danh sách thành viên nên cần báo riêng để app bỏ phòng khỏi danh sách
+            pushToUser(userId, roomUpdatedEvent(roomId));
+
+            out.onNext(LeaveRoomResponse.newBuilder()
+                    .setIsSuccess(true)
+                    .setStatusMessage("Bạn đã rời khỏi nhóm thành công.")
+                    .build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Rời nhóm {} thất bại", roomId, e);
+            fail(out, Status.INTERNAL.withDescription("Không rời được nhóm"));
+        }
+    }
+
+    /** Thêm thành viên vào nhóm. Mọi thành viên của nhóm đều được thêm người (như Messenger). */
+    @Override
+    public void addRoomMembers(AddRoomMembersRequest request, StreamObserver<AddRoomMembersResponse> out) {
+        String userId = request.getUserId().trim();
+        String roomId = request.getRoomId().trim();
+        if (userId.isEmpty() || roomId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu user_id hoặc room_id"));
+            return;
+        }
+        Set<String> requested = new LinkedHashSet<>();
+        for (String id : request.getMemberIdsList()) {
+            String trimmed = id.trim();
+            if (!trimmed.isEmpty() && !SYSTEM_SENDER.equals(trimmed)) requested.add(trimmed);
+        }
+        if (requested.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Chưa chọn thành viên để thêm"));
+            return;
+        }
+
+        try {
+            Document room = roomCollection.find(Filters.eq("_id", roomId)).first();
+            Status denied = requireGroupMember(room, userId);
+            if (denied != null) {
+                fail(out, denied);
+                return;
+            }
+
+            List<String> current = room.getList("member_ids", String.class);
+            Set<String> toAdd = new LinkedHashSet<>(requested);
+            toAdd.removeAll(current);
+
+            if (!toAdd.isEmpty()) {
+                if (current.size() + toAdd.size() > MAX_GROUP_MEMBERS) {
+                    fail(out, Status.INVALID_ARGUMENT.withDescription(
+                            "Nhóm tối đa " + MAX_GROUP_MEMBERS + " thành viên"));
+                    return;
+                }
+                if (userCollection.countDocuments(Filters.in("_id", toAdd)) != toAdd.size()) {
+                    fail(out, Status.NOT_FOUND.withDescription("Có người dùng không tồn tại"));
+                    return;
+                }
+                roomCollection.updateOne(Filters.eq("_id", roomId),
+                        Updates.addEachToSet("member_ids", new ArrayList<>(toAdd)));
+
+                Map<String, String> names = loadDisplayNames(
+                        Stream.concat(Stream.of(userId), toAdd.stream()).collect(Collectors.toList()));
+                String addedNames = toAdd.stream()
+                        .map(id -> names.getOrDefault(id, "Người dùng"))
+                        .collect(Collectors.joining(", "));
+                postSystemMessage(roomId, names.getOrDefault(userId, "Một thành viên")
+                        + " đã thêm " + addedNames + " vào nhóm.");
+            }
+
+            Document updated = roomCollection.find(Filters.eq("_id", roomId)).first();
+            out.onNext(AddRoomMembersResponse.newBuilder()
+                    .setRoom(buildRoom(updated, userId, loadDisplayNames(updated.getList("member_ids", String.class))))
+                    .setAddedCount(toAdd.size())
+                    .build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Thêm thành viên vào phòng {} thất bại", roomId, e);
+            fail(out, Status.INTERNAL.withDescription("Không thêm được thành viên"));
+        }
+    }
+
+    /** Đổi tên nhóm. Mọi thành viên của nhóm đều được đổi tên. */
+    @Override
+    public void updateRoomName(UpdateRoomNameRequest request, StreamObserver<UpdateRoomNameResponse> out) {
+        String userId = request.getUserId().trim();
+        String roomId = request.getRoomId().trim();
+        String name = request.getName().trim();
+        if (userId.isEmpty() || roomId.isEmpty()) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu user_id hoặc room_id"));
+            return;
+        }
+        if (name.isEmpty() || name.length() > MAX_GROUP_NAME) {
+            fail(out, Status.INVALID_ARGUMENT.withDescription(
+                    "Tên nhóm phải từ 1 đến " + MAX_GROUP_NAME + " ký tự"));
+            return;
+        }
+
+        try {
+            Document room = roomCollection.find(Filters.eq("_id", roomId)).first();
+            Status denied = requireGroupMember(room, userId);
+            if (denied != null) {
+                fail(out, denied);
+                return;
+            }
+
+            Document current = room;
+            if (!name.equals(room.getString("name"))) {
+                roomCollection.updateOne(Filters.eq("_id", roomId), Updates.set("name", name));
+                String actor = loadDisplayNames(List.of(userId)).getOrDefault(userId, "Một thành viên");
+                postSystemMessage(roomId, actor + " đã đổi tên nhóm thành \"" + name + "\".");
+                current = roomCollection.find(Filters.eq("_id", roomId)).first();
+            }
+
+            out.onNext(UpdateRoomNameResponse.newBuilder()
+                    .setRoom(buildRoom(current, userId, loadDisplayNames(current.getList("member_ids", String.class))))
+                    .build());
+            out.onCompleted();
+        } catch (Exception e) {
+            log.error("Đổi tên phòng {} thất bại", roomId, e);
+            fail(out, Status.INTERNAL.withDescription("Không đổi được tên nhóm"));
+        }
+    }
+
+    /** null nếu hợp lệ: phòng tồn tại, là nhóm, và người thực hiện đang là thành viên. */
+    private Status requireGroupMember(Document room, String userId) {
+        if (room == null) {
+            return Status.NOT_FOUND.withDescription("Không tìm thấy phòng chat.");
+        }
+        if (!"GROUP".equals(room.getString("type"))) {
+            return Status.INVALID_ARGUMENT.withDescription("Chỉ áp dụng cho phòng chat nhóm");
+        }
+        List<String> members = room.getList("member_ids", String.class);
+        if (members == null || !members.contains(userId)) {
+            return Status.PERMISSION_DENIED.withDescription("Bạn không thuộc phòng này");
+        }
+        return null;
+    }
+
+    /** Lưu tin nhắn hệ thống, cập nhật tin cuối của phòng rồi phát realtime tới các thành viên hiện tại. */
+    private void postSystemMessage(String roomId, String content) {
+        long now = System.currentTimeMillis();
+        String id = UUID.randomUUID().toString();
+        try {
+            messageCollection.insertOne(new Document()
+                    .append("_id", id)
+                    .append("room_id", roomId)
+                    .append("sender_id", SYSTEM_SENDER)
+                    .append("content", content)
+                    .append("timestamp", now)
+                    .append("type", "TEXT"));
+        } catch (Exception e) {
+            log.warn("Không lưu được tin hệ thống của phòng {}", roomId, e);
+            return;
+        }
+        ChatMessage msg = ChatMessage.newBuilder()
+                .setMessageId(id)
+                .setRoomId(roomId)
+                .setSenderId(SYSTEM_SENDER)
+                .setContent(content)
+                .setTimestamp(now)
+                .setType(MessageType.MESSAGE_TYPE_TEXT)
+                .build();
+        updateLastMessage(msg);
+        broadcastToRoom(roomId, ChatEvent.newBuilder()
+                .setEventType(EventType.EVENT_NEW_MESSAGE)
+                .setMessage(msg)
+                .setTimestamp(now)
+                .build());
+        broadcastToRoom(roomId, roomUpdatedEvent(roomId));
+    }
+
+    private static ChatEvent roomUpdatedEvent(String roomId) {
+        return ChatEvent.newBuilder()
+                .setEventType(EventType.EVENT_ROOM_UPDATED)
+                .setRoom(Room.newBuilder().setRoomId(roomId))
+                .setTimestamp(System.currentTimeMillis())
+                .build();
     }
 
     // ----------------------------------------------------------------- Tiện ích
