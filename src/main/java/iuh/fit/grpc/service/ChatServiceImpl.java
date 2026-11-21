@@ -7,51 +7,15 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.FindOneAndUpdateOptions;
 import com.mongodb.client.model.ReturnDocument;
-import iuh.fit.grpc.chat.AddRoomMembersRequest;
-import iuh.fit.grpc.chat.AddRoomMembersResponse;
-import iuh.fit.grpc.chat.LeaveRoomRequest;
-import iuh.fit.grpc.chat.LeaveRoomResponse;
-import iuh.fit.grpc.chat.UpdateRoomNameRequest;
-import iuh.fit.grpc.chat.UpdateRoomNameResponse;
+import iuh.fit.grpc.chat.*;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.Updates;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
-import iuh.fit.grpc.chat.ChatMessage;
-import iuh.fit.grpc.chat.ChatResponse;
-import iuh.fit.grpc.chat.ChatServiceGrpc;
-import iuh.fit.grpc.chat.CreateRoomRequest;
-import iuh.fit.grpc.chat.HistoryRequest;
-import io.grpc.stub.ServerCallStreamObserver;
-import iuh.fit.grpc.chat.ChatEvent;
-import iuh.fit.grpc.chat.EventType;
-import iuh.fit.grpc.chat.StreamEventsRequest;
-import java.util.concurrent.ConcurrentHashMap;
-import iuh.fit.grpc.chat.FriendRequestItem;
-import iuh.fit.grpc.chat.FriendRequestStatus;
-import iuh.fit.grpc.chat.SendFriendRequestReq;
-import iuh.fit.grpc.chat.SendFriendRequestResp;
-import iuh.fit.grpc.chat.RespondFriendRequestReq;
-import iuh.fit.grpc.chat.RespondFriendRequestResp;
-import iuh.fit.grpc.chat.ListFriendsReq;
-import iuh.fit.grpc.chat.ListFriendsResp;
-import iuh.fit.grpc.chat.ListFriendRequestsReq;
-import iuh.fit.grpc.chat.ListFriendRequestsResp;
-import iuh.fit.grpc.chat.HistoryResponse;
-import iuh.fit.grpc.chat.ListRoomsRequest;
-import iuh.fit.grpc.chat.ListRoomsResponse;
-import iuh.fit.grpc.chat.MarkRoomReadRequest;
-import iuh.fit.grpc.chat.MarkRoomReadResponse;
-import iuh.fit.grpc.chat.MessageType;
-import iuh.fit.grpc.chat.Room;
-import iuh.fit.grpc.chat.RoomMember;
-import iuh.fit.grpc.chat.RoomType;
-import iuh.fit.grpc.chat.SearchUsersRequest;
-import iuh.fit.grpc.chat.SearchUsersResponse;
-import iuh.fit.grpc.chat.UserSummary;
 import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -59,8 +23,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -68,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -97,8 +60,14 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private final MongoCollection<Document> friendRequestCollection = database.getCollection("friend_requests");
     private final MongoCollection<Document> friendshipCollection = database.getCollection("friendships");
 
-    // Quản lý active subscribers theo user_id cho Realtime Streaming
-    private final Map<String, Set<StreamObserver<ChatEvent>>> userSubscribers = new ConcurrentHashMap<>();
+
+    // Thu hồi, sửa, cảm xúc, bình chọn, ghim, đánh dấu sao: logic nằm ở MessageActions
+    // Hạ tầng dùng chung: realtime stream và các hàm đọc phòng. Các service tách ra sau này nhận lại hai đối tượng này.
+    private final RealtimeHub hub = new RealtimeHub(database);
+    private final RoomSupport support = new RoomSupport(database);
+
+    private final MessageActions actions =
+            new MessageActions(database, hub::broadcastToRoom, this::updateLastMessage);
 
     public ChatServiceImpl() {
         Thread t = new Thread(this::ensureIndexes, "mongo-index-init");
@@ -162,7 +131,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         }
 
         try {
-            Status denied = checkMembership(request.getRoomId(), request.getSenderId());
+            Status denied = support.checkMembership(request.getRoomId(), request.getSenderId());
             if (denied != null) {
                 out.onError(denied.asRuntimeException());
                 return;
@@ -223,7 +192,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .setMessage(request)
                     .setTimestamp(savedTimestamp)
                     .build();
-            broadcastToRoom(request.getRoomId(), event);
+            hub.broadcastToRoom(request.getRoomId(), event);
         }
 
         out.onNext(ChatResponse.newBuilder()
@@ -268,7 +237,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         }
 
         try {
-            Status denied = checkMembership(request.getRoomId(), request.getUserId());
+            Status denied = support.checkMembership(request.getRoomId(), request.getUserId());
             if (denied != null) {
                 responseObserver.onError(denied.asRuntimeException());
                 return;
@@ -320,6 +289,65 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             responseObserver.onError(Status.INTERNAL
                     .withDescription("Không lấy được lịch sử tin nhắn").asRuntimeException());
         }
+    }
+
+    // ------------------------------------------------------------ Hành động trên tin nhắn
+
+    @Override
+    public void revokeMessage(RevokeMessageRequest request, StreamObserver<RevokeMessageResponse> out) {
+        respond(out, () -> actions.revoke(request), "Không thu hồi được tin nhắn");
+    }
+
+    @Override
+    public void editMessage(EditMessageRequest request, StreamObserver<EditMessageResponse> out) {
+        respond(out, () -> actions.edit(request), "Không sửa được tin nhắn");
+    }
+
+    @Override
+    public void reactMessage(ReactMessageRequest request, StreamObserver<ReactMessageResponse> out) {
+        respond(out, () -> actions.react(request), "Không thả được cảm xúc");
+    }
+
+    @Override
+    public void createPoll(CreatePollRequest request, StreamObserver<PollResponse> out) {
+        respond(out, () -> actions.createPoll(request), "Không tạo được cuộc bình chọn");
+    }
+
+    @Override
+    public void votePoll(VotePollRequest request, StreamObserver<PollResponse> out) {
+        respond(out, () -> actions.votePoll(request), "Không ghi nhận được bình chọn");
+    }
+
+    @Override
+    public void pinMessage(PinMessageRequest request, StreamObserver<PinMessageResponse> out) {
+        respond(out, () -> actions.pin(request), "Không ghim được tin nhắn");
+    }
+
+    @Override
+    public void unpinMessage(UnpinMessageRequest request, StreamObserver<UnpinMessageResponse> out) {
+        respond(out, () -> actions.unpin(request), "Không bỏ ghim được tin nhắn");
+    }
+
+    @Override
+    public void toggleStarMessage(ToggleStarMessageRequest request, StreamObserver<ToggleStarMessageResponse> out) {
+        respond(out, () -> actions.toggleStar(request), "Không lưu được tin nhắn");
+    }
+
+    /** Lỗi nghiệp vụ (StatusRuntimeException) giữ nguyên mã; lỗi khác trả INTERNAL và ghi log. */
+    private <T> void respond(StreamObserver<T> out, Supplier<T> action, String failureMessage) {
+        T result;
+        try {
+            result = action.get();
+        } catch (StatusRuntimeException e) {
+            out.onError(e);
+            return;
+        } catch (Exception e) {
+            log.error(failureMessage, e);
+            out.onError(Status.INTERNAL.withDescription(failureMessage).asRuntimeException());
+            return;
+        }
+        out.onNext(result);
+        out.onCompleted();
     }
 
     // ------------------------------------------------------------ Tìm người dùng
@@ -426,9 +454,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             Document room = type == RoomType.ROOM_TYPE_DIRECT
                     ? createOrGetDirectRoom(creatorId, memberIds)
                     : createGroupRoom(creatorId, name, memberIds);
-            Map<String, String> names = loadDisplayNames(memberIds);
+            Map<String, String> names = support.loadDisplayNames(memberIds);
 
-            out.onNext(buildRoom(room, creatorId, names));
+            out.onNext(support.buildRoom(room, creatorId, names));
             out.onCompleted();
         } catch (Exception e) {
             log.error("Tạo phòng thất bại", e);
@@ -494,11 +522,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             for (Document d : rooms) {
                 memberIds.addAll(d.getList("member_ids", String.class));
             }
-            Map<String, String> names = loadDisplayNames(memberIds);
+            Map<String, String> names = support.loadDisplayNames(memberIds);
 
             ListRoomsResponse.Builder builder = ListRoomsResponse.newBuilder();
             for (Document d : rooms) {
-                builder.addRooms(buildRoom(d, userId, names));
+                builder.addRooms(support.buildRoom(d, userId, names));
             }
             out.onNext(builder.build());
             out.onCompleted();
@@ -517,7 +545,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             return;
         }
         try {
-            Status denied = checkMembership(roomId, userId);
+            Status denied = support.checkMembership(roomId, userId);
             if (denied != null) {
                 fail(out, denied);
                 return;
@@ -543,7 +571,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                         .setTimestamp(readUpTo)
                         .setRoom(Room.newBuilder().setRoomId(roomId).build())
                         .build();
-                broadcastToRoom(roomId, event);
+                hub.broadcastToRoom(roomId, event);
             }
             out.onNext(MarkRoomReadResponse.getDefaultInstance());
             out.onCompleted();
@@ -604,10 +632,10 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                                 Filters.eq("_id", roomId), Updates.set("created_by", newOwner)));
             }
 
-            String name = loadDisplayNames(List.of(userId)).getOrDefault(userId, "Một thành viên");
+            String name = support.loadDisplayNames(List.of(userId)).getOrDefault(userId, "Một thành viên");
             postSystemMessage(roomId, name + " đã rời khỏi nhóm.");
             // Người vừa rời không còn trong danh sách thành viên nên cần báo riêng để app bỏ phòng khỏi danh sách
-            pushToUser(userId, roomUpdatedEvent(roomId));
+            hub.pushToUser(userId, RealtimeHub.roomUpdatedEvent(roomId));
 
             out.onNext(LeaveRoomResponse.newBuilder()
                     .setIsSuccess(true)
@@ -664,7 +692,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 roomCollection.updateOne(Filters.eq("_id", roomId),
                         Updates.addEachToSet("member_ids", new ArrayList<>(toAdd)));
 
-                Map<String, String> names = loadDisplayNames(
+                Map<String, String> names = support.loadDisplayNames(
                         Stream.concat(Stream.of(userId), toAdd.stream()).collect(Collectors.toList()));
                 String addedNames = toAdd.stream()
                         .map(id -> names.getOrDefault(id, "Người dùng"))
@@ -675,7 +703,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
             Document updated = roomCollection.find(Filters.eq("_id", roomId)).first();
             out.onNext(AddRoomMembersResponse.newBuilder()
-                    .setRoom(buildRoom(updated, userId, loadDisplayNames(updated.getList("member_ids", String.class))))
+                    .setRoom(support.buildRoom(updated, userId, support.loadDisplayNames(updated.getList("member_ids", String.class))))
                     .setAddedCount(toAdd.size())
                     .build());
             out.onCompleted();
@@ -712,13 +740,13 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             Document current = room;
             if (!name.equals(room.getString("name"))) {
                 roomCollection.updateOne(Filters.eq("_id", roomId), Updates.set("name", name));
-                String actor = loadDisplayNames(List.of(userId)).getOrDefault(userId, "Một thành viên");
+                String actor = support.loadDisplayNames(List.of(userId)).getOrDefault(userId, "Một thành viên");
                 postSystemMessage(roomId, actor + " đã đổi tên nhóm thành \"" + name + "\".");
                 current = roomCollection.find(Filters.eq("_id", roomId)).first();
             }
 
             out.onNext(UpdateRoomNameResponse.newBuilder()
-                    .setRoom(buildRoom(current, userId, loadDisplayNames(current.getList("member_ids", String.class))))
+                    .setRoom(support.buildRoom(current, userId, support.loadDisplayNames(current.getList("member_ids", String.class))))
                     .build());
             out.onCompleted();
         } catch (Exception e) {
@@ -767,96 +795,15 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 .setType(MessageType.MESSAGE_TYPE_TEXT)
                 .build();
         updateLastMessage(msg);
-        broadcastToRoom(roomId, ChatEvent.newBuilder()
+        hub.broadcastToRoom(roomId, ChatEvent.newBuilder()
                 .setEventType(EventType.EVENT_NEW_MESSAGE)
                 .setMessage(msg)
                 .setTimestamp(now)
                 .build());
-        broadcastToRoom(roomId, roomUpdatedEvent(roomId));
-    }
-
-    private static ChatEvent roomUpdatedEvent(String roomId) {
-        return ChatEvent.newBuilder()
-                .setEventType(EventType.EVENT_ROOM_UPDATED)
-                .setRoom(Room.newBuilder().setRoomId(roomId))
-                .setTimestamp(System.currentTimeMillis())
-                .build();
+        hub.broadcastToRoom(roomId, RealtimeHub.roomUpdatedEvent(roomId));
     }
 
     // ----------------------------------------------------------------- Tiện ích
-
-    /** null nếu hợp lệ; ngược lại trả về Status lỗi tương ứng. */
-    private Status checkMembership(String roomId, String userId) {
-        if ("hq_ai_bot".equals(userId) || "SYSTEM".equals(userId)) {
-            return null;
-        }
-        Document room = roomCollection.find(Filters.eq("_id", roomId))
-                .projection(Projections.include("member_ids"))
-                .first();
-        if (room == null) {
-            return Status.NOT_FOUND.withDescription("Phòng không tồn tại");
-        }
-        List<String> members = room.getList("member_ids", String.class);
-        if (members == null || !members.contains(userId)) {
-            return Status.PERMISSION_DENIED.withDescription("Bạn không thuộc phòng này");
-        }
-        return null;
-    }
-
-    private Map<String, String> loadDisplayNames(Collection<String> ids) {
-        Map<String, String> names = new HashMap<>();
-        if (ids.isEmpty()) return names;
-        for (Document u : userCollection.find(Filters.in("_id", ids))
-                .projection(Projections.include("display_name"))) {
-            names.put(u.getString("_id"), u.getString("display_name"));
-        }
-        return names;
-    }
-
-    private Room buildRoom(Document d, String viewerId, Map<String, String> names) {
-        String roomId = d.getString("_id");
-        List<String> members = d.getList("member_ids", String.class);
-        boolean direct = "DIRECT".equals(d.getString("type"));
-
-        String name;
-        if (direct) {
-            String peerId = members.stream().filter(m -> !m.equals(viewerId)).findFirst().orElse(viewerId);
-            name = names.getOrDefault(peerId, "Người dùng");
-        } else {
-            name = d.getString("name");
-        }
-
-        Room.Builder builder = Room.newBuilder()
-                .setRoomId(roomId)
-                .setType(direct ? RoomType.ROOM_TYPE_DIRECT : RoomType.ROOM_TYPE_GROUP)
-                .setName(name == null ? "" : name)
-                .addAllMemberIds(members);
-        for (String memberId : members) {
-            builder.addMembers(RoomMember.newBuilder()
-                    .setUserId(memberId)
-                    .setDisplayName(names.getOrDefault(memberId, "Người dùng")));
-        }
-
-        Document last = d.get("last_message", Document.class);
-        if (last != null) {
-            builder.setLastMessageContent(last.getString("content"))
-                    .setLastMessageSenderId(last.getString("sender_id"))
-                    .setLastMessageTimestamp(last.getLong("timestamp"));
-        }
-
-        long readTs = 0;
-        Document lastRead = d.get("last_read", Document.class);
-        if (lastRead != null) {
-            Number n = lastRead.get(viewerId, Number.class);
-            if (n != null) readTs = n.longValue();
-        }
-        builder.setUnreadCount(messageCollection.countDocuments(Filters.and(
-                Filters.eq("room_id", roomId),
-                Filters.gt("timestamp", readTs),
-                Filters.ne("sender_id", viewerId))));
-
-        return builder.build();
-    }
 
     private static void fail(StreamObserver<?> out, Status status) {
         out.onError(status.asRuntimeException());
@@ -866,86 +813,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
     @Override
     public void subscribeEvents(StreamEventsRequest request, StreamObserver<ChatEvent> responseObserver) {
-        String userId = request.getUserId();
-        if (userId.isBlank()) {
-            responseObserver.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Thiếu user_id để subscribe").asRuntimeException());
-            return;
-        }
-
-        addSubscriber(userId, responseObserver);
-        log.info("User {} đã kết nối realtime event stream", userId);
-
-        if (responseObserver instanceof ServerCallStreamObserver<ChatEvent> serverObserver) {
-            serverObserver.setOnCancelHandler(() -> {
-                removeSubscriber(userId, responseObserver);
-                log.info("User {} đã hủy realtime event stream", userId);
-            });
-        }
-    }
-
-    /**
-     * Thêm stream của user. Dùng compute để thao tác atomic với removeSubscriber: trước đây
-     * "get set -> kiểm tra rỗng -> remove(userId)" của luồng hủy có thể xóa mất set vừa được
-     * luồng kết nối lại thêm stream mới vào, khiến user nối lại rồi nhưng không nhận được event nào.
-     */
-    private void addSubscriber(String userId, StreamObserver<ChatEvent> obs) {
-        userSubscribers.compute(userId, (k, set) -> {
-            if (set == null) set = ConcurrentHashMap.newKeySet();
-            set.add(obs);
-            return set;
-        });
-    }
-
-    private void removeSubscriber(String userId, StreamObserver<ChatEvent> obs) {
-        userSubscribers.computeIfPresent(userId, (k, set) -> {
-            set.remove(obs);
-            return set.isEmpty() ? null : set;
-        });
-    }
-
-    /** Gửi event tới mọi stream đang mở của một user. */
-    private void pushToUser(String userId, ChatEvent event) {
-        Set<StreamObserver<ChatEvent>> subscribers = userSubscribers.get(userId);
-        if (subscribers == null || subscribers.isEmpty()) return;
-
-        for (StreamObserver<ChatEvent> obs : subscribers) {
-            if (obs instanceof ServerCallStreamObserver
-                    && ((ServerCallStreamObserver<ChatEvent>) obs).isCancelled()) {
-                removeSubscriber(userId, obs);
-                continue;
-            }
-            try {
-                // StreamObserver của gRPC không an toàn đa luồng: các tin gửi cùng lúc phải xếp hàng theo từng stream
-                synchronized (obs) {
-                    obs.onNext(event);
-                }
-            } catch (Exception ex) {
-                log.warn("Gửi realtime event cho user {} lỗi, đóng stream để app kết nối lại", userId, ex);
-                removeSubscriber(userId, obs);
-                try {
-                    // Báo cho gateway biết stream đã hỏng, nếu không nó vẫn giữ WebSocket mở nhưng không nhận được gì
-                    obs.onError(Status.UNAVAILABLE.withDescription("Stream realtime lỗi").asRuntimeException());
-                } catch (Exception ignored) {
-                    // stream đã đóng sẵn
-                }
-            }
-        }
-    }
-
-    private void broadcastToRoom(String roomId, ChatEvent event) {
-        try {
-            Document room = roomCollection.find(Filters.eq("_id", roomId)).first();
-            if (room == null) return;
-            List<String> memberIds = room.getList("member_ids", String.class);
-            if (memberIds == null || memberIds.isEmpty()) return;
-
-            for (String memberId : memberIds) {
-                pushToUser(memberId, event);
-            }
-        } catch (Exception e) {
-            log.error("Lỗi khi phát tán realtime event cho phòng {}", roomId, e);
-        }
+        hub.subscribe(request, responseObserver);
     }
 
     // ------------------------------------------------------------------ Hệ thống kết bạn
@@ -1018,7 +886,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     .build();
 
             // Realtime push cho receiver
-            pushToUser(receiverId, ChatEvent.newBuilder()
+            hub.pushToUser(receiverId, ChatEvent.newBuilder()
                     .setEventType(EventType.EVENT_FRIEND_REQUEST)
                     .setFriendRequest(item)
                     .setTimestamp(now)
@@ -1081,7 +949,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                         .append("created_at", now));
 
                 // Realtime notify sender that their request was accepted
-                pushToUser(senderId, ChatEvent.newBuilder()
+                hub.pushToUser(senderId, ChatEvent.newBuilder()
                         .setEventType(EventType.EVENT_FRIEND_ACCEPTED)
                         .setUserId(userId)
                         .setTimestamp(now)
