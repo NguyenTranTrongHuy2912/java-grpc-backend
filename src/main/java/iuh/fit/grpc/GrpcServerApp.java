@@ -15,8 +15,7 @@ import java.io.IOException;
 public class GrpcServerApp {
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        String envPort = System.getenv("PORT");
-        int port = (envPort != null && !envPort.isBlank()) ? Integer.parseInt(envPort) : 50051;
+        int port = Integer.parseInt(Env.get("PORT", "50051"));
 
         EmailSender emailSender = "smtp".equalsIgnoreCase(Env.get("MAIL_MODE", "console"))
                 ? new SmtpEmailSender()

@@ -29,7 +29,7 @@ public class RoomSupport {
 
     /** null nếu hợp lệ; ngược lại trả về Status lỗi tương ứng. */
     public Status checkMembership(String roomId, String userId) {
-        if ("hq_ai_bot".equals(userId) || "SYSTEM".equals(userId)) {
+        if (Ids.isInternalActor(userId)) {
             return null;
         }
         Document room = rooms.find(Filters.eq("_id", roomId))
@@ -41,6 +41,25 @@ public class RoomSupport {
         List<String> members = room.getList("member_ids", String.class);
         if (members == null || !members.contains(userId)) {
             return Status.PERMISSION_DENIED.withDescription("Bạn không thuộc phòng này");
+        }
+        return null;
+    }
+
+    public static final int MAX_GROUP_NAME = 50;
+
+    /** null nếu tên nhóm hợp lệ. */
+    public static Status checkGroupName(String name) {
+        if (name == null || name.isEmpty() || name.length() > MAX_GROUP_NAME) {
+            return Status.INVALID_ARGUMENT.withDescription(
+                    "Tên nhóm phải từ 1 đến " + MAX_GROUP_NAME + " ký tự");
+        }
+        return null;
+    }
+
+    /** null nếu mọi id đều là người dùng đang tồn tại. */
+    public Status checkUsersExist(Collection<String> ids) {
+        if (users.countDocuments(Filters.in("_id", ids)) != ids.size()) {
+            return Status.NOT_FOUND.withDescription("Có người dùng không tồn tại");
         }
         return null;
     }

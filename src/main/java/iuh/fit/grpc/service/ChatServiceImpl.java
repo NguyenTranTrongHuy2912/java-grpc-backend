@@ -7,15 +7,62 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.FindOneAndUpdateOptions;
 import com.mongodb.client.model.ReturnDocument;
-import iuh.fit.grpc.chat.*;
+import iuh.fit.grpc.chat.AddRoomMembersRequest;
+import iuh.fit.grpc.chat.AddRoomMembersResponse;
+import iuh.fit.grpc.chat.LeaveRoomRequest;
+import iuh.fit.grpc.chat.LeaveRoomResponse;
+import iuh.fit.grpc.chat.UpdateRoomNameRequest;
+import iuh.fit.grpc.chat.UpdateRoomNameResponse;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
 import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.Updates;
 import io.grpc.Status;
-import io.grpc.StatusRuntimeException;
+import static iuh.fit.grpc.service.Rpc.fail;
+import static iuh.fit.grpc.service.Rpc.respond;
+import iuh.fit.grpc.chat.RevokeMessageRequest;
+import iuh.fit.grpc.chat.RevokeMessageResponse;
+import iuh.fit.grpc.chat.EditMessageRequest;
+import iuh.fit.grpc.chat.EditMessageResponse;
+import iuh.fit.grpc.chat.ReactMessageRequest;
+import iuh.fit.grpc.chat.ReactMessageResponse;
+import iuh.fit.grpc.chat.CreatePollRequest;
+import iuh.fit.grpc.chat.VotePollRequest;
+import iuh.fit.grpc.chat.PollResponse;
+import iuh.fit.grpc.chat.PinMessageRequest;
+import iuh.fit.grpc.chat.PinMessageResponse;
+import iuh.fit.grpc.chat.UnpinMessageRequest;
+import iuh.fit.grpc.chat.UnpinMessageResponse;
+import iuh.fit.grpc.chat.ToggleStarMessageRequest;
+import iuh.fit.grpc.chat.ToggleStarMessageResponse;
 import io.grpc.stub.StreamObserver;
+import iuh.fit.grpc.chat.ChatMessage;
+import iuh.fit.grpc.chat.ChatResponse;
+import iuh.fit.grpc.chat.ChatServiceGrpc;
+import iuh.fit.grpc.chat.CreateRoomRequest;
+import iuh.fit.grpc.chat.HistoryRequest;
+import iuh.fit.grpc.chat.ChatEvent;
+import iuh.fit.grpc.chat.EventType;
+import iuh.fit.grpc.chat.StreamEventsRequest;
+import iuh.fit.grpc.chat.SendFriendRequestReq;
+import iuh.fit.grpc.chat.SendFriendRequestResp;
+import iuh.fit.grpc.chat.RespondFriendRequestReq;
+import iuh.fit.grpc.chat.RespondFriendRequestResp;
+import iuh.fit.grpc.chat.ListFriendsReq;
+import iuh.fit.grpc.chat.ListFriendsResp;
+import iuh.fit.grpc.chat.ListFriendRequestsReq;
+import iuh.fit.grpc.chat.ListFriendRequestsResp;
+import iuh.fit.grpc.chat.HistoryResponse;
+import iuh.fit.grpc.chat.ListRoomsRequest;
+import iuh.fit.grpc.chat.ListRoomsResponse;
+import iuh.fit.grpc.chat.MarkRoomReadRequest;
+import iuh.fit.grpc.chat.MarkRoomReadResponse;
+import iuh.fit.grpc.chat.MessageType;
+import iuh.fit.grpc.chat.Room;
+import iuh.fit.grpc.chat.RoomType;
+import iuh.fit.grpc.chat.SearchUsersRequest;
+import iuh.fit.grpc.chat.SearchUsersResponse;
 import iuh.fit.grpc.config.MongoConfig;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -30,8 +77,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Supplier;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -39,32 +84,23 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
     private static final Logger log = LoggerFactory.getLogger(ChatServiceImpl.class);
 
     // Quy tắc nghiệp vụ — chỉnh ở đây nếu muốn đổi
-    private static final int MAX_GROUP_NAME = 50;
     private static final int MIN_GROUP_OTHER_MEMBERS = 2;   // không tính người tạo => nhóm tối thiểu 3 người
     private static final int MAX_GROUP_MEMBERS = 100;
-    private static final int MIN_SEARCH_LENGTH = 2;
-    private static final int MAX_SEARCH_LENGTH = 100;
-    private static final int DEFAULT_SEARCH_LIMIT = 10;
-    private static final int MAX_SEARCH_LIMIT = 20;
     private static final int MAX_ROOMS_PER_LIST = 200;
     private static final int MAX_MEDIA_URL = 500;
-    /** Người gửi của tin nhắn hệ thống (rời nhóm, thêm thành viên, đổi tên...). Khớp với gateway và client hiện tại. */
-    private static final String SYSTEM_SENDER = "system";
-    private static final String AI_BOT_ID = "hq_ai_bot";
     private static final String IMAGE_PREVIEW = "Đã gửi một ảnh";
 
     private final MongoDatabase database = MongoConfig.getDatabase();
     private final MongoCollection<Document> messageCollection = database.getCollection("messages");
     private final MongoCollection<Document> roomCollection = database.getCollection("rooms");
-    private final MongoCollection<Document> userCollection = database.getCollection("users");
-    private final MongoCollection<Document> friendRequestCollection = database.getCollection("friend_requests");
-    private final MongoCollection<Document> friendshipCollection = database.getCollection("friendships");
 
 
     // Thu hồi, sửa, cảm xúc, bình chọn, ghim, đánh dấu sao: logic nằm ở MessageActions
     // Hạ tầng dùng chung: realtime stream và các hàm đọc phòng. Các service tách ra sau này nhận lại hai đối tượng này.
     private final RealtimeHub hub = new RealtimeHub(database);
     private final RoomSupport support = new RoomSupport(database);
+    private final FriendService friends = new FriendService(database, hub);
+    private final UserSearchService userSearch = new UserSearchService(database);
 
     private final MessageActions actions =
             new MessageActions(database, hub::broadcastToRoom, this::updateLastMessage);
@@ -85,13 +121,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     Indexes.descending("updated_at")));
             roomCollection.createIndex(Indexes.ascending("direct_key"),
                     new IndexOptions().unique(true).sparse(true));
-            friendRequestCollection.createIndex(Indexes.compoundIndex(
-                    Indexes.ascending("receiver_id"),
-                    Indexes.ascending("status")));
-            friendshipCollection.createIndex(Indexes.compoundIndex(
-                            Indexes.ascending("user_id"),
-                            Indexes.ascending("friend_id")),
-                    new IndexOptions().unique(true));
+            friends.ensureIndexes();
             log.info("Đã tạo xong index MongoDB");
         } catch (Exception e) {
             log.error("Không tạo được index (sẽ không retry): {}", e.getMessage());
@@ -333,68 +363,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         respond(out, () -> actions.toggleStar(request), "Không lưu được tin nhắn");
     }
 
-    /** Lỗi nghiệp vụ (StatusRuntimeException) giữ nguyên mã; lỗi khác trả INTERNAL và ghi log. */
-    private <T> void respond(StreamObserver<T> out, Supplier<T> action, String failureMessage) {
-        T result;
-        try {
-            result = action.get();
-        } catch (StatusRuntimeException e) {
-            out.onError(e);
-            return;
-        } catch (Exception e) {
-            log.error(failureMessage, e);
-            out.onError(Status.INTERNAL.withDescription(failureMessage).asRuntimeException());
-            return;
-        }
-        out.onNext(result);
-        out.onCompleted();
-    }
-
     // ------------------------------------------------------------ Tìm người dùng
 
     @Override
     public void searchUsers(SearchUsersRequest request, StreamObserver<SearchUsersResponse> out) {
-        String requesterId = request.getRequesterId().trim();
-        String query = request.getQuery().trim();
-        if (requesterId.isEmpty()) {
-            fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu requester_id"));
-            return;
-        }
-        if (query.length() < MIN_SEARCH_LENGTH || query.length() > MAX_SEARCH_LENGTH) {
-            fail(out, Status.INVALID_ARGUMENT.withDescription(
-                    "Từ khóa phải từ " + MIN_SEARCH_LENGTH + " đến " + MAX_SEARCH_LENGTH + " ký tự"));
-            return;
-        }
-        int limit = request.getLimit() <= 0 ? DEFAULT_SEARCH_LIMIT
-                : Math.min(request.getLimit(), MAX_SEARCH_LIMIT);
-
-        try {
-            Bson match;
-            if (query.contains("@")) {
-                // Email được lưu đã chuẩn hóa (chữ thường) => khớp theo tiền tố
-                match = Filters.regex("account", "^" + Pattern.quote(AuthServiceImpl.normalizeEmail(query)));
-            } else {
-                // Tên: chứa từ khóa, không phân biệt hoa thường
-                match = Filters.regex("display_name", Pattern.quote(query), "i");
-            }
-
-            SearchUsersResponse.Builder builder = SearchUsersResponse.newBuilder();
-            for (Document u : userCollection
-                    .find(Filters.and(match, Filters.ne("_id", requesterId)))
-                    .projection(Projections.include("display_name", "account"))
-                    .sort(Sorts.ascending("display_name"))
-                    .limit(limit)) {
-                builder.addUsers(UserSummary.newBuilder()
-                        .setUserId(u.getString("_id"))
-                        .setDisplayName(u.getString("display_name"))
-                        .setEmail(u.getString("account")));
-            }
-            out.onNext(builder.build());
-            out.onCompleted();
-        } catch (Exception e) {
-            log.error("Tìm người dùng thất bại", e);
-            fail(out, Status.INTERNAL.withDescription("Không tìm được người dùng"));
-        }
+        userSearch.searchUsers(request, out);
     }
 
     // ------------------------------------------------------------------- Phòng
@@ -421,9 +394,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 return;
             }
         } else if (type == RoomType.ROOM_TYPE_GROUP) {
-            if (name.isEmpty() || name.length() > MAX_GROUP_NAME) {
-                fail(out, Status.INVALID_ARGUMENT.withDescription(
-                        "Tên nhóm phải từ 1 đến " + MAX_GROUP_NAME + " ký tự"));
+            Status badName = RoomSupport.checkGroupName(name);
+            if (badName != null) {
+                fail(out, badName);
                 return;
             }
             if (others.size() < MIN_GROUP_OTHER_MEMBERS) {
@@ -446,8 +419,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             memberIds.add(creatorId);
             memberIds.addAll(others);
 
-            if (userCollection.countDocuments(Filters.in("_id", memberIds)) != memberIds.size()) {
-                fail(out, Status.NOT_FOUND.withDescription("Có người dùng không tồn tại"));
+            Status missing = support.checkUsersExist(memberIds);
+            if (missing != null) {
+                fail(out, missing);
                 return;
             }
 
@@ -626,7 +600,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             if (remaining == null) remaining = List.of();
             if (userId.equals(after.getString("created_by"))) {
                 remaining.stream()
-                        .filter(m -> !AI_BOT_ID.equals(m))
+                        .filter(m -> !Ids.AI_BOT.equals(m))
                         .findFirst()
                         .ifPresent(newOwner -> roomCollection.updateOne(
                                 Filters.eq("_id", roomId), Updates.set("created_by", newOwner)));
@@ -660,7 +634,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         Set<String> requested = new LinkedHashSet<>();
         for (String id : request.getMemberIdsList()) {
             String trimmed = id.trim();
-            if (!trimmed.isEmpty() && !SYSTEM_SENDER.equals(trimmed)) requested.add(trimmed);
+            if (!trimmed.isEmpty() && !Ids.SYSTEM.equals(trimmed)) requested.add(trimmed);
         }
         if (requested.isEmpty()) {
             fail(out, Status.INVALID_ARGUMENT.withDescription("Chưa chọn thành viên để thêm"));
@@ -685,8 +659,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                             "Nhóm tối đa " + MAX_GROUP_MEMBERS + " thành viên"));
                     return;
                 }
-                if (userCollection.countDocuments(Filters.in("_id", toAdd)) != toAdd.size()) {
-                    fail(out, Status.NOT_FOUND.withDescription("Có người dùng không tồn tại"));
+                Status missing = support.checkUsersExist(toAdd);
+                if (missing != null) {
+                    fail(out, missing);
                     return;
                 }
                 roomCollection.updateOne(Filters.eq("_id", roomId),
@@ -723,9 +698,9 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             fail(out, Status.INVALID_ARGUMENT.withDescription("Thiếu user_id hoặc room_id"));
             return;
         }
-        if (name.isEmpty() || name.length() > MAX_GROUP_NAME) {
-            fail(out, Status.INVALID_ARGUMENT.withDescription(
-                    "Tên nhóm phải từ 1 đến " + MAX_GROUP_NAME + " ký tự"));
+        Status badName = RoomSupport.checkGroupName(name);
+        if (badName != null) {
+            fail(out, badName);
             return;
         }
 
@@ -778,7 +753,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             messageCollection.insertOne(new Document()
                     .append("_id", id)
                     .append("room_id", roomId)
-                    .append("sender_id", SYSTEM_SENDER)
+                    .append("sender_id", Ids.SYSTEM)
                     .append("content", content)
                     .append("timestamp", now)
                     .append("type", "TEXT"));
@@ -789,7 +764,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         ChatMessage msg = ChatMessage.newBuilder()
                 .setMessageId(id)
                 .setRoomId(roomId)
-                .setSenderId(SYSTEM_SENDER)
+                .setSenderId(Ids.SYSTEM)
                 .setContent(content)
                 .setTimestamp(now)
                 .setType(MessageType.MESSAGE_TYPE_TEXT)
@@ -803,12 +778,6 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
         hub.broadcastToRoom(roomId, RealtimeHub.roomUpdatedEvent(roomId));
     }
 
-    // ----------------------------------------------------------------- Tiện ích
-
-    private static void fail(StreamObserver<?> out, Status status) {
-        out.onError(status.asRuntimeException());
-    }
-
     // ------------------------------------------------------------------ Realtime Streaming
 
     @Override
@@ -820,226 +789,21 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
     @Override
     public void sendFriendRequest(SendFriendRequestReq request, StreamObserver<SendFriendRequestResp> out) {
-        String senderId = request.getSenderId();
-        String receiverId = request.getReceiverId();
-
-        if (senderId.isBlank() || receiverId.isBlank()) {
-            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu sender_id hoặc receiver_id").asRuntimeException());
-            return;
-        }
-        if (senderId.equals(receiverId)) {
-            out.onError(Status.INVALID_ARGUMENT.withDescription("Không thể kết bạn với chính mình").asRuntimeException());
-            return;
-        }
-
-        try {
-            // Kiểm tra đã là bạn bè chưa
-            Document existingFriendship = friendshipCollection.find(
-                    Filters.and(Filters.eq("user_id", senderId), Filters.eq("friend_id", receiverId))
-            ).first();
-            if (existingFriendship != null) {
-                out.onError(Status.ALREADY_EXISTS.withDescription("Hai người đã là bạn bè").asRuntimeException());
-                return;
-            }
-
-            // Kiểm tra đã có lời mời đang chờ chưa
-            Document pending = friendRequestCollection.find(
-                    Filters.and(
-                            Filters.eq("sender_id", senderId),
-                            Filters.eq("receiver_id", receiverId),
-                            Filters.eq("status", "PENDING")
-                    )
-            ).first();
-            if (pending != null) {
-                out.onError(Status.ALREADY_EXISTS.withDescription("Đã gửi lời mời kết bạn trước đó").asRuntimeException());
-                return;
-            }
-
-            // Lấy thông tin người gửi
-            Document senderDoc = userCollection.find(Filters.eq("_id", senderId)).first();
-            String senderName = senderDoc != null && senderDoc.getString("display_name") != null
-                    ? senderDoc.getString("display_name") : "Người dùng";
-            String senderEmail = senderDoc != null && senderDoc.getString("account") != null
-                    ? senderDoc.getString("account") : "";
-
-            String requestId = UUID.randomUUID().toString();
-            long now = System.currentTimeMillis();
-
-            Document reqDoc = new Document()
-                    .append("_id", requestId)
-                    .append("sender_id", senderId)
-                    .append("sender_name", senderName)
-                    .append("sender_email", senderEmail)
-                    .append("receiver_id", receiverId)
-                    .append("created_at", now)
-                    .append("status", "PENDING");
-            friendRequestCollection.insertOne(reqDoc);
-
-            FriendRequestItem item = FriendRequestItem.newBuilder()
-                    .setRequestId(requestId)
-                    .setSenderId(senderId)
-                    .setSenderName(senderName)
-                    .setSenderEmail(senderEmail)
-                    .setReceiverId(receiverId)
-                    .setCreatedAt(now)
-                    .setStatus(FriendRequestStatus.FRIEND_REQUEST_PENDING)
-                    .build();
-
-            // Realtime push cho receiver
-            hub.pushToUser(receiverId, ChatEvent.newBuilder()
-                    .setEventType(EventType.EVENT_FRIEND_REQUEST)
-                    .setFriendRequest(item)
-                    .setTimestamp(now)
-                    .build());
-
-            out.onNext(SendFriendRequestResp.newBuilder()
-                    .setIsSuccess(true)
-                    .setStatusMessage("Đã gửi lời mời kết bạn")
-                    .setRequest(item)
-                    .build());
-            out.onCompleted();
-        } catch (Exception e) {
-            log.error("Gửi lời mời kết bạn thất bại", e);
-            out.onError(Status.INTERNAL.withDescription("Không gửi được lời mời kết bạn").asRuntimeException());
-        }
+        friends.sendFriendRequest(request, out);
     }
 
     @Override
     public void respondFriendRequest(RespondFriendRequestReq request, StreamObserver<RespondFriendRequestResp> out) {
-        String userId = request.getUserId();
-        String reqId = request.getRequestId();
-        boolean accept = request.getAccept();
-
-        if (userId.isBlank() || reqId.isBlank()) {
-            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu thông tin").asRuntimeException());
-            return;
-        }
-
-        try {
-            Document reqDoc = friendRequestCollection.find(
-                    Filters.and(
-                            Filters.eq("_id", reqId),
-                            Filters.eq("receiver_id", userId),
-                            Filters.eq("status", "PENDING")
-                    )
-            ).first();
-
-            if (reqDoc == null) {
-                out.onError(Status.NOT_FOUND.withDescription("Không tìm thấy lời mời kết bạn hoặc đã được xử lý").asRuntimeException());
-                return;
-            }
-
-            String senderId = reqDoc.getString("sender_id");
-            long now = System.currentTimeMillis();
-
-            if (accept) {
-                friendRequestCollection.updateOne(
-                        Filters.eq("_id", reqId),
-                        Updates.set("status", "ACCEPTED")
-                );
-
-                // Thêm quan hệ bạn bè 2 chiều
-                friendshipCollection.insertOne(new Document()
-                        .append("user_id", userId)
-                        .append("friend_id", senderId)
-                        .append("created_at", now));
-                friendshipCollection.insertOne(new Document()
-                        .append("user_id", senderId)
-                        .append("friend_id", userId)
-                        .append("created_at", now));
-
-                // Realtime notify sender that their request was accepted
-                hub.pushToUser(senderId, ChatEvent.newBuilder()
-                        .setEventType(EventType.EVENT_FRIEND_ACCEPTED)
-                        .setUserId(userId)
-                        .setTimestamp(now)
-                        .build());
-            } else {
-                friendRequestCollection.updateOne(
-                        Filters.eq("_id", reqId),
-                        Updates.set("status", "REJECTED")
-                );
-            }
-
-            out.onNext(RespondFriendRequestResp.newBuilder()
-                    .setIsSuccess(true)
-                    .setStatusMessage(accept ? "Đã chấp nhận kết bạn" : "Đã từ chối lời mời")
-                    .build());
-            out.onCompleted();
-        } catch (Exception e) {
-            log.error("Xử lý lời mời kết bạn thất bại", e);
-            out.onError(Status.INTERNAL.withDescription("Không xử lý được lời mời").asRuntimeException());
-        }
+        friends.respondFriendRequest(request, out);
     }
 
     @Override
     public void listFriends(ListFriendsReq request, StreamObserver<ListFriendsResp> out) {
-        String userId = request.getUserId();
-        if (userId.isBlank()) {
-            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu user_id").asRuntimeException());
-            return;
-        }
-
-        try {
-            List<Document> friendships = friendshipCollection.find(Filters.eq("user_id", userId)).into(new ArrayList<>());
-            List<UserSummary> list = new ArrayList<>();
-            for (Document f : friendships) {
-                String friendId = f.getString("friend_id");
-                if (friendId != null) {
-                    Document u = userCollection.find(Filters.eq("_id", friendId)).first();
-                    if (u != null) {
-                        list.add(UserSummary.newBuilder()
-                                .setUserId(friendId)
-                                .setDisplayName(u.getString("display_name") != null ? u.getString("display_name") : "")
-                                .setEmail(u.getString("account") != null ? u.getString("account") : "")
-                                .setAvatarUrl(u.getString("avatar_url") != null ? u.getString("avatar_url") : "")
-                                .build());
-                    }
-                }
-            }
-
-            out.onNext(ListFriendsResp.newBuilder().addAllFriends(list).build());
-            out.onCompleted();
-        } catch (Exception e) {
-            log.error("Liệt kê bạn bè thất bại", e);
-            out.onError(Status.INTERNAL.withDescription("Không lấy được danh sách bạn bè").asRuntimeException());
-        }
+        friends.listFriends(request, out);
     }
 
     @Override
     public void listFriendRequests(ListFriendRequestsReq request, StreamObserver<ListFriendRequestsResp> out) {
-        String userId = request.getUserId();
-        if (userId.isBlank()) {
-            out.onError(Status.INVALID_ARGUMENT.withDescription("Thiếu user_id").asRuntimeException());
-            return;
-        }
-
-        try {
-            List<Document> requests = friendRequestCollection.find(
-                    Filters.and(
-                            Filters.eq("receiver_id", userId),
-                            Filters.eq("status", "PENDING")
-                    )
-            ).sort(Sorts.descending("created_at")).into(new ArrayList<>());
-
-            List<FriendRequestItem> items = new ArrayList<>();
-            for (Document d : requests) {
-                items.add(FriendRequestItem.newBuilder()
-                        .setRequestId(d.getString("_id"))
-                        .setSenderId(d.getString("sender_id"))
-                        .setSenderName(d.getString("sender_name") != null ? d.getString("sender_name") : "")
-                        .setSenderEmail(d.getString("sender_email") != null ? d.getString("sender_email") : "")
-                        .setReceiverId(userId)
-                        .setCreatedAt(d.getLong("created_at") != null ? d.getLong("created_at") : 0L)
-                        .setStatus(FriendRequestStatus.FRIEND_REQUEST_PENDING)
-                        .build());
-            }
-
-            out.onNext(ListFriendRequestsResp.newBuilder().addAllRequests(items).build());
-            out.onCompleted();
-        } catch (Exception e) {
-            log.error("Liệt kê lời mời kết bạn thất bại", e);
-            out.onError(Status.INTERNAL.withDescription("Không lấy được danh sách lời mời").asRuntimeException());
-        }
+        friends.listFriendRequests(request, out);
     }
 }

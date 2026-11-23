@@ -33,8 +33,8 @@ public class OtpService {
     private static final int MAX_ATTEMPTS = 5;
 
     /** Mỗi mục đích có bản ghi OTP riêng, mã đăng ký không dùng được để đặt lại mật khẩu. */
-    public static final String PURPOSE_REGISTER = "register";
-    public static final String PURPOSE_RESET_PASSWORD = "reset_password";
+    public static final String PURPOSE_REGISTER = EmailSender.PURPOSE_REGISTER;
+    public static final String PURPOSE_RESET_PASSWORD = EmailSender.PURPOSE_RESET_PASSWORD;
 
     private final MongoCollection<Document> otps =
             MongoConfig.getDatabase().getCollection("otp_codes");
