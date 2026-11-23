@@ -1,8 +1,11 @@
 package iuh.fit.grpc.mail;
 
+import iuh.fit.grpc.config.Env;
+
 /**
  * Nội dung email OTP (HTML và bản chữ thuần dự phòng).
  * Chỉ chèn mã số và thời hạn, không chèn dữ liệu do người dùng nhập nên không cần escape HTML.
+ * Logo lấy từ biến môi trường MAIL_LOGO_URL (đường dẫn HTTPS công khai). Để trống thì không hiện logo.
  */
 public final class OtpEmailTemplate {
     private OtpEmailTemplate() {}
@@ -30,9 +33,18 @@ public final class OtpEmailTemplate {
                 ? "Bạn vừa yêu cầu đặt lại mật khẩu cho tài khoản của mình."
                 : "Bạn (hoặc Quản trị viên) vừa yêu cầu tạo tài khoản trên hệ thống <strong>HQ ChatApp</strong>.";
         return PAGE
+                .replace("{{LOGO}}", logoHtml())
                 .replace("{{DESC}}", desc)
                 .replace("{{CODE}}", code)
                 .replace("{{TTL}}", String.valueOf(ttlMinutes));
+    }
+
+    /** Thẻ img cho logo; trả về chuỗi rỗng nếu chưa cấu hình MAIL_LOGO_URL. */
+    private static String logoHtml() {
+        String url = Env.get("MAIL_LOGO_URL", "").trim();
+        if (url.isEmpty()) return "";
+        return "<img src=\"" + url + "\" width=\"72\" height=\"72\" alt=\"HQ ChatApp\" "
+                + "style=\"display: block; margin: 0 auto 14px; border-radius: 18px; background-color: #ffffff;\">";
     }
 
     private static final String PAGE = """
@@ -49,6 +61,7 @@ public final class OtpEmailTemplate {
                             <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0;">
                                 <tr>
                                     <td align="center" style="padding: 32px 24px 20px; background: #2563EB;">
+                                        {{LOGO}}
                                         <h1 style="color: #ffffff; font-size: 22px; font-weight: 800; margin: 0 0 4px;">HQ ChatApp Security</h1>
                                         <p style="color: #bfdbfe; font-size: 13px; margin: 0; font-weight: 500;">Hệ thống xác thực tài khoản an toàn</p>
                                     </td>
