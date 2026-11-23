@@ -23,6 +23,8 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Date;
 import java.util.HexFormat;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class OtpService {
@@ -41,6 +43,11 @@ public class OtpService {
     private final SecureRandom random = new SecureRandom();
     private final byte[] secret = Env.require("OTP_SECRET").getBytes(StandardCharsets.UTF_8);
     private final EmailSender emailSender;
+    private final ExecutorService mailExecutor = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "otp-mail-worker");
+        t.setDaemon(true);
+        return t;
+    });
 
     public OtpService(EmailSender emailSender) {
         this.emailSender = emailSender;
@@ -73,14 +80,16 @@ public class OtpService {
                         .append("expires_at", new Date(now + TTL_SECONDS * 1000L)),
                 new ReplaceOptions().upsert(true));
 
-        try {
-            emailSender.sendOtp(email, code, TTL_SECONDS / 60, purpose);
-        } catch (Exception e) {
-            log.error("Gửi OTP tới {} thất bại", email, e);
-            otps.deleteOne(Filters.eq("_id", key));  // cho phép thử lại ngay
-            throw Status.UNAVAILABLE.withDescription("Không gửi được email, thử lại sau")
-                    .asRuntimeException();
-        }
+        // Gửi email bất đồng bộ qua thread pool chuyên dụng để không làm nghẽn worker thread của gRPC
+        mailExecutor.submit(() -> {
+            try {
+                emailSender.sendOtp(email, code, TTL_SECONDS / 60, purpose);
+                log.info("Đã gửi mã OTP thành công tới {}", email);
+            } catch (Exception e) {
+                log.error("Gửi OTP tới {} thất bại trong background", email, e);
+                otps.deleteOne(Filters.eq("_id", key)); // cho phép thử lại ngay
+            }
+        });
     }
 
     public void verify(String email, String code) {

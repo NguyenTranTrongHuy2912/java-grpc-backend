@@ -18,6 +18,12 @@ import iuh.fit.grpc.chat.AuthResponse;
 import iuh.fit.grpc.chat.AuthServiceGrpc;
 import iuh.fit.grpc.chat.ChangePasswordLoggedInRequest;
 import iuh.fit.grpc.chat.ChangePasswordLoggedInResponse;
+import iuh.fit.grpc.chat.DeleteUserRequest;
+import iuh.fit.grpc.chat.DeleteUserResponse;
+import iuh.fit.grpc.chat.GetSystemStatsRequest;
+import iuh.fit.grpc.chat.GetSystemStatsResponse;
+import iuh.fit.grpc.chat.GetUserStatusRequest;
+import iuh.fit.grpc.chat.GetUserStatusResponse;
 import iuh.fit.grpc.chat.LoginRequest;
 import iuh.fit.grpc.chat.OtpPurpose;
 import iuh.fit.grpc.chat.RegisterRequest;
@@ -25,6 +31,10 @@ import iuh.fit.grpc.chat.RequestOtpRequest;
 import iuh.fit.grpc.chat.RequestOtpResponse;
 import iuh.fit.grpc.chat.ResetPasswordRequest;
 import iuh.fit.grpc.chat.ResetPasswordResponse;
+import iuh.fit.grpc.chat.SetUserActiveRequest;
+import iuh.fit.grpc.chat.SetUserActiveResponse;
+import iuh.fit.grpc.chat.SetUserRoleRequest;
+import iuh.fit.grpc.chat.SetUserRoleResponse;
 import iuh.fit.grpc.chat.UpdateProfileRequest;
 import iuh.fit.grpc.chat.UpdateProfileResponse;
 import iuh.fit.grpc.config.Env;
@@ -157,6 +167,8 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
                 .setDisplayName(user.getString("display_name"));
         String avatar = user.getString("avatar_url");
         if (avatar != null) builder.setAvatarUrl(avatar);
+        String role = user.getString("role");
+        if (role != null) builder.setRole(role);
         return builder.build();
     }
 
@@ -325,5 +337,101 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
                     .setStatusMessage("Đổi mật khẩu thành công")
                     .build();
         }, "Không đổi được mật khẩu");
+    }
+
+    @Override
+    public void getUserStatus(GetUserStatusRequest request, StreamObserver<GetUserStatusResponse> out) {
+        Rpc.respond(out, () -> {
+            String userId = request.getUserId();
+            if (userId == null || userId.isBlank()) {
+                throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
+            }
+            Document user = users.find(Filters.eq("_id", userId)).first();
+            if (user == null) {
+                throw userNotFound();
+            }
+            String role = user.getString("role");
+            if (role == null || role.isBlank()) role = "USER";
+            boolean isActive = user.getBoolean("is_active", true);
+            long pwdChanged = 0L;
+            if (user.containsKey("password_changed_at")) {
+                Object val = user.get("password_changed_at");
+                if (val instanceof Number n) pwdChanged = n.longValue();
+            }
+            return GetUserStatusResponse.newBuilder()
+                    .setUserId(userId)
+                    .setRole(role)
+                    .setIsActive(isActive)
+                    .setPasswordChangedAt(pwdChanged)
+                    .build();
+        }, "Không lấy được trạng thái người dùng");
+    }
+
+    @Override
+    public void setUserRole(SetUserRoleRequest request, StreamObserver<SetUserRoleResponse> out) {
+        Rpc.respond(out, () -> {
+            String userId = request.getUserId();
+            String role = request.getRole();
+            if (userId == null || userId.isBlank()) {
+                throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
+            }
+            String normRole = "ADMIN".equalsIgnoreCase(role) ? "ADMIN" : "USER";
+            users.updateOne(Filters.eq("_id", userId), Updates.set("role", normRole));
+            return SetUserRoleResponse.newBuilder()
+                    .setIsSuccess(true)
+                    .setUserId(userId)
+                    .setRole(normRole)
+                    .build();
+        }, "Không cập nhật được quyền người dùng");
+    }
+
+    @Override
+    public void setUserActive(SetUserActiveRequest request, StreamObserver<SetUserActiveResponse> out) {
+        Rpc.respond(out, () -> {
+            String userId = request.getUserId();
+            boolean isActive = request.getIsActive();
+            if (userId == null || userId.isBlank()) {
+                throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
+            }
+            users.updateOne(Filters.eq("_id", userId), Updates.set("is_active", isActive));
+            return SetUserActiveResponse.newBuilder()
+                    .setIsSuccess(true)
+                    .setUserId(userId)
+                    .setIsActive(isActive)
+                    .build();
+        }, "Không cập nhật được trạng thái tài khoản");
+    }
+
+    @Override
+    public void deleteUser(DeleteUserRequest request, StreamObserver<DeleteUserResponse> out) {
+        Rpc.respond(out, () -> {
+            String userId = request.getUserId();
+            if (userId == null || userId.isBlank()) {
+                throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
+            }
+            users.deleteOne(Filters.eq("_id", userId));
+            return DeleteUserResponse.newBuilder()
+                    .setIsSuccess(true)
+                    .setUserId(userId)
+                    .build();
+        }, "Không xóa được người dùng");
+    }
+
+    @Override
+    public void getSystemStats(GetSystemStatsRequest request, StreamObserver<GetSystemStatsResponse> out) {
+        Rpc.respond(out, () -> {
+            long totalUsers = users.countDocuments();
+            long totalAdmins = users.countDocuments(Filters.eq("role", "ADMIN"));
+            long totalActiveUsers = users.countDocuments(Filters.eq("is_active", true));
+            long totalRooms = MongoConfig.getDatabase().getCollection("rooms").countDocuments();
+            long totalMessages = MongoConfig.getDatabase().getCollection("messages").countDocuments();
+            return GetSystemStatsResponse.newBuilder()
+                    .setTotalUsers(totalUsers)
+                    .setTotalAdmins(totalAdmins)
+                    .setTotalActiveUsers(totalActiveUsers)
+                    .setTotalRooms(totalRooms)
+                    .setTotalMessages(totalMessages)
+                    .build();
+        }, "Không lấy được thống kê hệ thống");
     }
 }

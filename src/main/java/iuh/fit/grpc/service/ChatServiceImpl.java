@@ -192,6 +192,11 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                     message.append("media_duration_ms", request.getMediaDurationMs());
                 }
             }
+            if (!request.getReplyTo().isBlank()) message.append("reply_to", request.getReplyTo());
+            if (!request.getFileName().isBlank()) message.append("file_name", request.getFileName());
+            if (request.getFileSize() > 0) message.append("file_size", request.getFileSize());
+            if (!request.getPollId().isBlank()) message.append("poll_id", request.getPollId());
+            if (request.getIsForwarded()) message.append("is_forwarded", true);
             messageCollection.insertOne(message);
             inserted = true;
         } catch (MongoWriteException e) {
@@ -309,6 +314,13 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                             .setMediaHeight(d.getInteger("media_height", 0))
                             .setMediaDurationMs(d.getLong("media_duration_ms") != null ? d.getLong("media_duration_ms") : 0);
                 }
+                if (d.containsKey("reply_to") && d.getString("reply_to") != null) mb.setReplyTo(d.getString("reply_to"));
+                if (d.containsKey("file_name") && d.getString("file_name") != null) mb.setFileName(d.getString("file_name"));
+                if (d.containsKey("file_size") && d.get("file_size") instanceof Number n) mb.setFileSize(n.longValue());
+                if (d.containsKey("poll_id") && d.getString("poll_id") != null) mb.setPollId(d.getString("poll_id"));
+                if (d.containsKey("is_forwarded") && Boolean.TRUE.equals(d.getBoolean("is_forwarded"))) mb.setIsForwarded(true);
+                if (d.containsKey("is_edited") && Boolean.TRUE.equals(d.getBoolean("is_edited"))) mb.setIsEdited(true);
+                if (d.containsKey("edited_at") && d.get("edited_at") instanceof Number n) mb.setEditedAt(n.longValue());
                 builder.addMessages(mb);
             }
 
