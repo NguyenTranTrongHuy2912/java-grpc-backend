@@ -15,7 +15,9 @@ public final class Env {
     public static String require(String key) {
         String v = dotenv.get(key);
         if (v == null || v.isBlank()) {
-            throw new IllegalStateException("Thiếu biến cấu hình " + key);
+            throw new IllegalStateException(
+                    "Thiếu biến cấu hình " + key + ". Hãy tạo file .env từ .env.example "
+                            + "hoặc đặt biến này trong môi trường chạy.");
         }
         return v;
     }
