@@ -7,7 +7,9 @@ import jakarta.mail.PasswordAuthentication;
 import jakarta.mail.Session;
 import jakarta.mail.Transport;
 import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
 import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
 
 import java.util.Properties;
 
@@ -42,18 +44,17 @@ public class SmtpEmailSender implements EmailSender {
         MimeMessage msg = new MimeMessage(session);
         msg.setFrom(new InternetAddress(from));
         msg.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to, false));
-        boolean reset = "reset_password".equals(purpose);
-        String subject = reset ? "Mã đặt lại mật khẩu ChatApp" : "Mã xác thực đăng ký ChatApp";
-        String intro = reset
-                ? "Bạn vừa yêu cầu đặt lại mật khẩu. Mã xác thực của bạn là: "
-                : "Mã xác thực đăng ký tài khoản của bạn là: ";
-        String ignore = reset
-                ? "Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này, mật khẩu của bạn vẫn an toàn."
-                : "Nếu bạn không yêu cầu, hãy bỏ qua email này.";
-        msg.setSubject(subject, "UTF-8");
-        msg.setText(intro + code + "\n\n"
-                + "Mã có hiệu lực trong " + ttlMinutes + " phút. "
-                + ignore, "UTF-8");
+        msg.setSubject(OtpEmailTemplate.subject(purpose), "UTF-8");
+
+        // Bản chữ thuần dự phòng cho ứng dụng thư không hiển thị được HTML
+        MimeBodyPart plain = new MimeBodyPart();
+        plain.setText(OtpEmailTemplate.text(code, ttlMinutes, purpose), "UTF-8");
+        MimeBodyPart html = new MimeBodyPart();
+        html.setContent(OtpEmailTemplate.html(code, ttlMinutes, purpose), "text/html; charset=UTF-8");
+        MimeMultipart body = new MimeMultipart("alternative");
+        body.addBodyPart(plain);
+        body.addBodyPart(html);
+        msg.setContent(body);
         Transport.send(msg);
     }
 }
