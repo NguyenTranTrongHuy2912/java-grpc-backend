@@ -35,6 +35,24 @@ public class UserSearchService {
         this.userCollection = db.getCollection("users");
     }
 
+    private static String makeVnRegex(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : s.toLowerCase(Locale.ROOT).toCharArray()) {
+            switch (c) {
+                case 'a' -> sb.append("[aàáảãạăằắẳẵặâầấẩẫậ]");
+                case 'e' -> sb.append("[eèéẻẽẹêềếểễệ]");
+                case 'i' -> sb.append("[iìíỉĩị]");
+                case 'o' -> sb.append("[oòóỏõọôồốổỗộơờớởỡợ]");
+                case 'u' -> sb.append("[uùúủũụưừứửữự]");
+                case 'y' -> sb.append("[yỳýỷỹỵ]");
+                case 'd' -> sb.append("[dđ]");
+                case '.', '^', '$', '*', '+', '?', '(', ')', '[', '{', '\\', '|' -> sb.append('\\').append(c);
+                default -> sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     public void searchUsers(SearchUsersRequest request, StreamObserver<SearchUsersResponse> out) {
         String requesterId = request.getRequesterId().trim();
         String query = request.getQuery().trim();
@@ -52,15 +70,16 @@ public class UserSearchService {
 
         try {
             String qLower = query.toLowerCase(Locale.ROOT);
-            // Thuật toán tìm kiếm thông minh: Tìm đồng thời cả Tên hiển thị (display_name) và Email/Account
+            String qVn = makeVnRegex(query);
+            // Thuật toán tìm kiếm thông minh: Tìm đồng thời cả Tên hiển thị (hỗ trợ tiếng Việt không dấu) và Email/Account
             Bson match = Filters.or(
                     Filters.regex("account", Pattern.quote(qLower), "i"),
-                    Filters.regex("display_name", Pattern.quote(query), "i")
+                    Filters.regex("display_name", qVn, "i")
             );
 
             SearchUsersResponse.Builder builder = SearchUsersResponse.newBuilder();
             for (Document u : userCollection
-                    .find(Filters.and(match, Filters.ne("_id", requesterId), Filters.ne("is_active", false)))
+                    .find(Filters.and(match, Filters.ne("is_active", false)))
                     .projection(Projections.include("display_name", "account"))
                     .sort(Sorts.ascending("display_name"))
                     .limit(limit)) {
