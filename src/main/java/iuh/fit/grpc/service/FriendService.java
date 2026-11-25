@@ -83,9 +83,11 @@ public class FriendService {
             // Kiểm tra đã có lời mời đang chờ chưa
             Document pending = friendRequestCollection.find(
                     Filters.and(
-                            Filters.eq("sender_id", senderId),
-                            Filters.eq("receiver_id", receiverId),
-                            Filters.eq("status", "PENDING")
+                            Filters.eq("status", "PENDING"),
+                            Filters.or(
+                                    Filters.and(Filters.eq("sender_id", senderId), Filters.eq("receiver_id", receiverId)),
+                                    Filters.and(Filters.eq("sender_id", receiverId), Filters.eq("receiver_id", senderId))
+                            )
                     )
             ).first();
             if (pending != null) {
