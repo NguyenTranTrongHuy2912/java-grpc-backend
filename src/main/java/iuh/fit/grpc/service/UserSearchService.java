@@ -15,11 +15,12 @@ import org.bson.conversions.Bson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 import static iuh.fit.grpc.service.Rpc.fail;
 
-/** Tìm người dùng theo tên (chứa từ khóa) hoặc theo email (tiền tố). */
+/** Tìm người dùng theo tên hoặc theo email (hỗ trợ cả chữ hoa, chữ thường và tìm theo tiền tố/hậu tố). */
 public class UserSearchService {
     private static final Logger log = LoggerFactory.getLogger(UserSearchService.class);
 
@@ -50,25 +51,25 @@ public class UserSearchService {
                 : Math.min(request.getLimit(), MAX_SEARCH_LIMIT);
 
         try {
-            Bson match;
-            if (query.contains("@")) {
-                // Email được lưu đã chuẩn hóa (chữ thường) => khớp theo tiền tố
-                match = Filters.regex("account", "^" + Pattern.quote(AuthServiceImpl.normalizeEmail(query)));
-            } else {
-                // Tên: chứa từ khóa, không phân biệt hoa thường
-                match = Filters.regex("display_name", Pattern.quote(query), "i");
-            }
+            String qLower = query.toLowerCase(Locale.ROOT);
+            // Thuật toán tìm kiếm thông minh: Tìm đồng thời cả Tên hiển thị (display_name) và Email/Account
+            Bson match = Filters.or(
+                    Filters.regex("account", Pattern.quote(qLower), "i"),
+                    Filters.regex("display_name", Pattern.quote(query), "i")
+            );
 
             SearchUsersResponse.Builder builder = SearchUsersResponse.newBuilder();
             for (Document u : userCollection
-                    .find(Filters.and(match, Filters.ne("_id", requesterId)))
+                    .find(Filters.and(match, Filters.ne("_id", requesterId), Filters.ne("is_active", false)))
                     .projection(Projections.include("display_name", "account"))
                     .sort(Sorts.ascending("display_name"))
                     .limit(limit)) {
+                String dName = u.getString("display_name");
+                String acc = u.getString("account");
                 builder.addUsers(UserSummary.newBuilder()
                         .setUserId(u.getString("_id"))
-                        .setDisplayName(u.getString("display_name"))
-                        .setEmail(u.getString("account")));
+                        .setDisplayName(dName != null ? dName : (acc != null ? acc.split("@")[0] : "Người dùng"))
+                        .setEmail(acc != null ? acc : ""));
             }
             out.onNext(builder.build());
             out.onCompleted();
