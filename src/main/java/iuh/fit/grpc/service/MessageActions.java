@@ -27,10 +27,10 @@ import java.util.function.Consumer;
 /**
  * Các hành động trên tin nhắn: thu hồi, sửa, thả cảm xúc, bình chọn, ghim, đánh dấu sao.
  * Đây là nơi DUY NHẤT ghi các dữ liệu này; gateway chỉ gọi RPC.
- *
+ * <p>
  * Mọi hàm public ném StatusRuntimeException khi lỗi nghiệp vụ. ChatServiceImpl chuyển lỗi đó
  * sang StreamObserver, còn lỗi khác (Mongo...) thành INTERNAL.
- *
+ * <p>
  * Schema Mongo giữ nguyên như gateway cũ đang ghi, để các chỗ gateway còn đọc trực tiếp
  * (lịch sử, danh sách tin đã lưu...) tiếp tục chạy.
  */
@@ -237,7 +237,7 @@ public class MessageActions {
 
     private static Document toReactionDocument(Map<String, List<String>> map) {
         Document d = new Document();
-        map.forEach((emoji, ids) -> d.append(emoji, ids));
+        map.forEach(d::append);
         return d;
     }
 

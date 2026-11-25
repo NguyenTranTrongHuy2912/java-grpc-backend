@@ -343,7 +343,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
     public void getUserStatus(GetUserStatusRequest request, StreamObserver<GetUserStatusResponse> out) {
         Rpc.respond(out, () -> {
             String userId = request.getUserId();
-            if (userId == null || userId.isBlank()) {
+            if (userId.isBlank()) {
                 throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
             }
             Document user = users.find(Filters.eq("_id", userId)).first();
@@ -372,7 +372,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         Rpc.respond(out, () -> {
             String userId = request.getUserId();
             String role = request.getRole();
-            if (userId == null || userId.isBlank()) {
+            if (userId.isBlank()) {
                 throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
             }
             String normRole = "ADMIN".equalsIgnoreCase(role) ? "ADMIN" : "USER";
@@ -390,7 +390,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
         Rpc.respond(out, () -> {
             String userId = request.getUserId();
             boolean isActive = request.getIsActive();
-            if (userId == null || userId.isBlank()) {
+            if (userId.isBlank()) {
                 throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
             }
             users.updateOne(Filters.eq("_id", userId), Updates.set("is_active", isActive));
@@ -406,7 +406,7 @@ public class AuthServiceImpl extends AuthServiceGrpc.AuthServiceImplBase {
     public void deleteUser(DeleteUserRequest request, StreamObserver<DeleteUserResponse> out) {
         Rpc.respond(out, () -> {
             String userId = request.getUserId();
-            if (userId == null || userId.isBlank()) {
+            if (userId.isBlank()) {
                 throw Rpc.error(Status.INVALID_ARGUMENT, "Thiếu user_id");
             }
             users.deleteOne(Filters.eq("_id", userId));

@@ -663,7 +663,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
 
             List<String> current = room.getList("member_ids", String.class);
             Set<String> toAdd = new LinkedHashSet<>(requested);
-            toAdd.removeAll(current);
+            current.forEach(toAdd::remove);
 
             if (!toAdd.isEmpty()) {
                 if (current.size() + toAdd.size() > MAX_GROUP_MEMBERS) {
@@ -689,6 +689,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
             }
 
             Document updated = roomCollection.find(Filters.eq("_id", roomId)).first();
+            assert updated != null;
             out.onNext(AddRoomMembersResponse.newBuilder()
                     .setRoom(support.buildRoom(updated, userId, support.loadDisplayNames(updated.getList("member_ids", String.class))))
                     .setAddedCount(toAdd.size())
@@ -732,6 +733,7 @@ public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
                 current = roomCollection.find(Filters.eq("_id", roomId)).first();
             }
 
+            assert current != null;
             out.onNext(UpdateRoomNameResponse.newBuilder()
                     .setRoom(support.buildRoom(current, userId, support.loadDisplayNames(current.getList("member_ids", String.class))))
                     .build());
